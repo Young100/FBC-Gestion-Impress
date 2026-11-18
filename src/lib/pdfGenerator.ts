@@ -20,8 +20,8 @@ async function getHorizontalLogoPng(): Promise<string | null> {
     });
 
     const canvas = document.createElement('canvas');
-    canvas.width = 588;
-    canvas.height = 365;
+    canvas.width = 1176;
+    canvas.height = 730;
     const ctx = canvas.getContext('2d');
     if (!ctx) return null;
     ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
@@ -59,30 +59,30 @@ export async function generateQuotePdf(order: Order, settings: ShopSettings): Pr
 
   // Header band
   doc.setFillColor(237, 242, 244); // #EDF2F4
-  doc.rect(0, 0, 210, 40, 'F');
+  doc.rect(0, 0, 210, 46, 'F');
 
   if (logoPng) {
-    doc.addImage(logoPng, 'PNG', 14, 5, 36, 22);
+    doc.addImage(logoPng, 'PNG', 8, 3, 64, 39.7);
   } else {
     doc.setFont('helvetica', 'bold');
-    doc.setFontSize(20);
+    doc.setFontSize(24);
     doc.setTextColor(38, 84, 124);
-    doc.text('FBC Print', 15, 22);
+    doc.text('FBC Print', 15, 26);
   }
 
   doc.setFillColor(38, 84, 124); // #26547C
-  doc.roundedRect(128, 8, 67, 24, 3, 3, 'F');
+  doc.roundedRect(128, 11, 67, 24, 3, 3, 'F');
   doc.setTextColor(255, 255, 255);
   doc.setFont('helvetica', 'bold');
   doc.setFontSize(13);
-  doc.text('DEVIS OFFICIEL', 161.5, 17, { align: 'center' });
+  doc.text('DEVIS OFFICIEL', 161.5, 20, { align: 'center' });
   doc.setFont('helvetica', 'normal');
   doc.setFontSize(9.5);
-  doc.text(`N° ${order.quoteNumber}`, 161.5, 23, { align: 'center' });
-  doc.text(`Commande : ${order.orderNumber}`, 161.5, 28, { align: 'center' });
+  doc.text(`N° ${order.quoteNumber}`, 161.5, 26, { align: 'center' });
+  doc.text(`Commande : ${order.orderNumber}`, 161.5, 31, { align: 'center' });
 
   // Client & Dates info
-  let y = 50;
+  let y = 55;
   doc.setTextColor(0, 0, 0);
   doc.setFont('helvetica', 'bold');
   doc.setFontSize(10.5);
@@ -235,26 +235,31 @@ export async function generateReceiptPdf(
   const logoPng = await getHorizontalLogoPng();
 
   doc.setFillColor(237, 242, 244);
-  doc.rect(0, 0, 210, 40, 'F');
+  doc.rect(0, 0, 210, 46, 'F');
 
   if (logoPng) {
-    doc.addImage(logoPng, 'PNG', 14, 5, 36, 22);
+    doc.addImage(logoPng, 'PNG', 8, 3, 64, 39.7);
+  } else {
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(24);
+    doc.setTextColor(38, 84, 124);
+    doc.text('FBC Print', 15, 26);
   }
 
   doc.setFillColor(38, 84, 124);
-  doc.roundedRect(124, 8, 71, 24, 3, 3, 'F');
+  doc.roundedRect(124, 11, 71, 24, 3, 3, 'F');
   doc.setTextColor(255, 255, 255);
   doc.setFont('helvetica', 'bold');
   doc.setFontSize(12.5);
-  doc.text('REÇU DE PAIEMENT', 159.5, 17, { align: 'center' });
+  doc.text('REÇU DE PAIEMENT', 159.5, 20, { align: 'center' });
   doc.setFont('helvetica', 'normal');
   doc.setFontSize(9.5);
-  doc.text(`N° ${order.receiptNumber || 'REC-' + order.orderNumber}`, 159.5, 23, {
+  doc.text(`N° ${order.receiptNumber || 'REC-' + order.orderNumber}`, 159.5, 26, {
     align: 'center',
   });
-  doc.text(`Commande : ${order.orderNumber}`, 159.5, 28, { align: 'center' });
+  doc.text(`Commande : ${order.orderNumber}`, 159.5, 31, { align: 'center' });
 
-  let y = 52;
+  let y = 56;
   doc.setTextColor(46, 158, 107); // #2E9E6B
   doc.setFont('helvetica', 'bold');
   doc.setFontSize(11);
