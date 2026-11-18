@@ -1,0 +1,6 @@
+{
+  "name": "FBC Print — Commande & Suivi d'Impression",
+  "description": "Plateforme mobile-first de commande d'impression professionnelle sans compression de fichiers, génération de devis PDF, paiement Mobile Money et suivi de production en temps réel pour FBC Print.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

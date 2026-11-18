@@ -1,0 +1,268 @@
+{
+  "entities": {
+    "ShopSettings": {
+      "title": "ShopSettings",
+      "description": "Configuration générale de la boutique FBC Print",
+      "type": "object",
+      "properties": {
+        "shopName": { "type": "string", "maxLength": 120 },
+        "phone": { "type": "string", "maxLength": 30 },
+        "whatsapp": { "type": "string", "maxLength": 30 },
+        "email": { "type": "string", "maxLength": 120 },
+        "address": { "type": "string", "maxLength": 200 },
+        "openingHours": { "type": "string", "maxLength": 200 },
+        "isOpen": { "type": "boolean" },
+        "closedMessage": { "type": "string", "maxLength": 500 },
+        "allowedExtensions": { "type": "array" },
+        "maxFileSizeMb": { "type": "number" },
+        "quoteValidityDays": { "type": "number" },
+        "fileRetentionDays": { "type": "number" },
+        "depositPercent": { "type": "number" },
+        "urgentSurchargePercent": { "type": "number" },
+        "deliveryZones": { "type": "array" },
+        "termsText": { "type": "string", "maxLength": 3000 },
+        "telegramBotEnabled": { "type": "boolean" },
+        "whatsappAdminNumber": { "type": "string", "maxLength": 30 },
+        "updatedAt": { "type": "string", "maxLength": 40 }
+      },
+      "required": ["shopName", "phone", "whatsapp", "email", "address", "isOpen", "maxFileSizeMb", "quoteValidityDays", "depositPercent"]
+    },
+    "PrintService": {
+      "title": "PrintService",
+      "description": "Prestation d'impression configurable avec mode de calcul et paliers",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "slug": { "type": "string", "maxLength": 64 },
+        "name": { "type": "string", "maxLength": 120 },
+        "description": { "type": "string", "maxLength": 500 },
+        "imageKey": { "type": "string", "maxLength": 120 },
+        "imageUrl": { "type": "string", "maxLength": 500 },
+        "pricingMode": { "type": "string", "enum": ["per_sqm", "per_format", "per_unit_tier", "per_apparel", "per_jersey", "per_page_copy"] },
+        "basePrice": { "type": "number" },
+        "recommendedDpi": { "type": "number" },
+        "active": { "type": "boolean" },
+        "sortOrder": { "type": "number" },
+        "config": { "type": "object" },
+        "updatedAt": { "type": "string", "maxLength": 40 }
+      },
+      "required": ["id", "slug", "name", "pricingMode", "basePrice", "active", "sortOrder"]
+    },
+    "PaymentMethod": {
+      "title": "PaymentMethod",
+      "description": "Opérateur Mobile Money configuré pour les règlements manuels",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 64, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "operatorName": { "type": "string", "maxLength": 80 },
+        "phoneNumber": { "type": "string", "maxLength": 40 },
+        "accountHolder": { "type": "string", "maxLength": 120 },
+        "instructions": { "type": "string", "maxLength": 600 },
+        "ussdCode": { "type": "string", "maxLength": 80 },
+        "active": { "type": "boolean" },
+        "sortOrder": { "type": "number" }
+      },
+      "required": ["id", "operatorName", "phoneNumber", "accountHolder", "active", "sortOrder"]
+    },
+    "Order": {
+      "title": "Order",
+      "description": "Commande client avec lignes de prestations, fichiers sans compression et suivi",
+      "type": "object",
+      "properties": {
+        "orderId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "orderNumber": { "type": "string", "maxLength": 40 },
+        "trackingCode": { "type": "string", "maxLength": 40 },
+        "quoteNumber": { "type": "string", "maxLength": 40 },
+        "receiptNumber": { "type": "string", "maxLength": 40 },
+        "customerName": { "type": "string", "maxLength": 120 },
+        "customerPhone": { "type": "string", "maxLength": 30 },
+        "isWhatsapp": { "type": "boolean" },
+        "wantsDelivery": { "type": "boolean" },
+        "deliveryZoneId": { "type": "string", "maxLength": 64 },
+        "deliveryZoneName": { "type": "string", "maxLength": 120 },
+        "deliveryAddress": { "type": "string", "maxLength": 300 },
+        "deliveryFee": { "type": "number" },
+        "urgent": { "type": "boolean" },
+        "urgentFee": { "type": "number" },
+        "discountAmount": { "type": "number" },
+        "subtotal": { "type": "number" },
+        "totalAmount": { "type": "number" },
+        "depositRequiredAmount": { "type": "number" },
+        "paidAmount": { "type": "number" },
+        "status": { "type": "string", "enum": ["recue", "en_verification", "fichier_a_corriger", "en_attente_paiement", "payee", "en_production", "prete", "livree", "annulee"] },
+        "paymentStatus": { "type": "string", "enum": ["non_paye", "en_attente_validation", "partiellement_paye", "paye", "rejete"] },
+        "paymentRejectionReason": { "type": "string", "maxLength": 400 },
+        "correctionRequestMessage": { "type": "string", "maxLength": 1000 },
+        "cancellationReason": { "type": "string", "maxLength": 400 },
+        "promisedDeliveryDate": { "type": "string", "maxLength": 40 },
+        "internalNotes": { "type": "string", "maxLength": 2000 },
+        "acceptedTerms": { "type": "boolean" },
+        "quoteValidUntil": { "type": "string", "maxLength": 40 },
+        "items": { "type": "array" },
+        "files": { "type": "array" },
+        "statusHistory": { "type": "array" },
+        "paymentIds": { "type": "array" },
+        "latestPayment": { "type": "object" },
+        "source": { "type": "string", "enum": ["web", "manual_admin"] },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["orderId", "orderNumber", "trackingCode", "quoteNumber", "customerName", "customerPhone", "status", "paymentStatus", "totalAmount", "items", "files", "statusHistory", "acceptedTerms", "createdAt", "updatedAt"]
+    },
+    "OrderLookup": {
+      "title": "OrderLookup",
+      "description": "Index de recherche sécurisé numéro de commande + téléphone vers orderId",
+      "type": "object",
+      "properties": {
+        "orderId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "orderNumber": { "type": "string", "maxLength": 40 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["orderId", "orderNumber", "createdAt"]
+    },
+    "Payment": {
+      "title": "Payment",
+      "description": "Déclaration de paiement Mobile Money avec preuve et validation manuelle",
+      "type": "object",
+      "properties": {
+        "paymentId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "orderId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "orderNumber": { "type": "string", "maxLength": 40 },
+        "customerName": { "type": "string", "maxLength": 120 },
+        "methodId": { "type": "string", "maxLength": 64 },
+        "methodName": { "type": "string", "maxLength": 80 },
+        "depositPhone": { "type": "string", "maxLength": 40 },
+        "transactionRef": { "type": "string", "maxLength": 100 },
+        "declaredAmount": { "type": "number" },
+        "paymentType": { "type": "string", "enum": ["acompte", "integral", "solde"] },
+        "screenshotFileId": { "type": "string", "maxLength": 128 },
+        "screenshotPreviewUrl": { "type": "string", "maxLength": 300 },
+        "status": { "type": "string", "enum": ["en_attente_validation", "valide", "rejete"] },
+        "rejectionReason": { "type": "string", "maxLength": 400 },
+        "validatedByEmail": { "type": "string", "maxLength": 120 },
+        "validatedAt": { "type": "string", "maxLength": 40 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["paymentId", "orderId", "orderNumber", "customerName", "methodId", "methodName", "depositPhone", "declaredAmount", "paymentType", "status", "createdAt"]
+    },
+    "ClientProfile": {
+      "title": "ClientProfile",
+      "description": "Fiche client interne de l'atelier FBC Print",
+      "type": "object",
+      "properties": {
+        "clientId": { "type": "string", "maxLength": 128 },
+        "name": { "type": "string", "maxLength": 120 },
+        "phone": { "type": "string", "maxLength": 30 },
+        "isWhatsapp": { "type": "boolean" },
+        "address": { "type": "string", "maxLength": 300 },
+        "notes": { "type": "string", "maxLength": 1000 },
+        "totalOrders": { "type": "number" },
+        "totalSpent": { "type": "number" },
+        "lastOrderAt": { "type": "string", "maxLength": 40 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["clientId", "name", "phone", "totalOrders", "totalSpent", "createdAt"]
+    },
+    "AdminUser": {
+      "title": "AdminUser",
+      "description": "Compte administrateur principal ou opérateur d'atelier",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "maxLength": 128 },
+        "email": { "type": "string", "maxLength": 120 },
+        "displayName": { "type": "string", "maxLength": 120 },
+        "role": { "type": "string", "enum": ["admin", "operator"] },
+        "active": { "type": "boolean" },
+        "lastLoginAt": { "type": "string", "maxLength": 40 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "email", "role", "active", "createdAt"]
+    },
+    "AdminInvite": {
+      "title": "AdminInvite",
+      "description": "Invitation par e-mail attribuant un rôle admin ou opérateur",
+      "type": "object",
+      "properties": {
+        "email": { "type": "string", "maxLength": 120 },
+        "role": { "type": "string", "enum": ["admin", "operator"] },
+        "displayName": { "type": "string", "maxLength": 120 },
+        "invitedBy": { "type": "string", "maxLength": 120 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["email", "role", "invitedBy", "createdAt"]
+    },
+    "AuditLog": {
+      "title": "AuditLog",
+      "description": "Journal immuable des actions sensibles d'administration",
+      "type": "object",
+      "properties": {
+        "logId": { "type": "string", "maxLength": 128 },
+        "action": { "type": "string", "maxLength": 80 },
+        "targetType": { "type": "string", "maxLength": 60 },
+        "targetId": { "type": "string", "maxLength": 128 },
+        "actorEmail": { "type": "string", "maxLength": 120 },
+        "actorRole": { "type": "string", "maxLength": 40 },
+        "details": { "type": "string", "maxLength": 600 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["logId", "action", "targetType", "targetId", "actorEmail", "actorRole", "createdAt"]
+    },
+    "Counter": {
+      "title": "Counter",
+      "description": "Compteur séquentiel unique pour commandes, devis et reçus",
+      "type": "object",
+      "properties": {
+        "lastOrderSeq": { "type": "number" },
+        "lastQuoteSeq": { "type": "number" },
+        "lastReceiptSeq": { "type": "number" }
+      },
+      "required": ["lastOrderSeq", "lastQuoteSeq", "lastReceiptSeq"]
+    }
+  },
+  "firestore": {
+    "/settings/{settingId}": {
+      "schema": { "$ref": "#/entities/ShopSettings" },
+      "description": "Configuration globale de la boutique FBC Print"
+    },
+    "/services/{serviceId}": {
+      "schema": { "$ref": "#/entities/PrintService" },
+      "description": "Catalogue des prestations d'impression et grilles tarifaires"
+    },
+    "/payment_methods/{methodId}": {
+      "schema": { "$ref": "#/entities/PaymentMethod" },
+      "description": "Moyens de paiement Mobile Money disponibles"
+    },
+    "/orders/{orderId}": {
+      "schema": { "$ref": "#/entities/Order" },
+      "description": "Commandes d'impression avec identifiant secret de suivi"
+    },
+    "/order_lookups/{lookupKey}": {
+      "schema": { "$ref": "#/entities/OrderLookup" },
+      "description": "Correspondance sécurisée numéro de commande + téléphone vers orderId"
+    },
+    "/payments/{paymentId}": {
+      "schema": { "$ref": "#/entities/Payment" },
+      "description": "Déclarations de paiements Mobile Money et preuves associées"
+    },
+    "/clients/{clientId}": {
+      "schema": { "$ref": "#/entities/ClientProfile" },
+      "description": "Répertoire clients privé de l'atelier"
+    },
+    "/admin_users/{uid}": {
+      "schema": { "$ref": "#/entities/AdminUser" },
+      "description": "Comptes administrateurs et opérateurs actifs"
+    },
+    "/admin_invites/{email}": {
+      "schema": { "$ref": "#/entities/AdminInvite" },
+      "description": "Invitations pré-approuvées pour l'accès atelier"
+    },
+    "/audit_logs/{logId}": {
+      "schema": { "$ref": "#/entities/AuditLog" },
+      "description": "Journal immuable des actions sensibles"
+    },
+    "/counters/{counterId}": {
+      "schema": { "$ref": "#/entities/Counter" },
+      "description": "Séquences continues de numérotation"
+    }
+  }
+}

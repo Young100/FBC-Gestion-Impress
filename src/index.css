@@ -1,0 +1,35 @@
+@import "tailwindcss";
+
+@theme {
+  --font-display: "Momo Trust Display", "Epilogue", system-ui, -apple-system, sans-serif;
+  --font-sans: "Epilogue", system-ui, -apple-system, sans-serif;
+  --color-fbc-blue: #26547C;
+  --color-fbc-teal: #119DA4;
+  --color-fbc-red: #EF233C;
+  --color-fbc-bg: #EDF2F4;
+  --color-fbc-green: #2E9E6B;
+}
+
+@layer base {
+  html, body {
+    font-family: var(--font-sans);
+    background-color: #EDF2F4;
+    color: #000000;
+    scroll-behavior: smooth;
+    overflow-x: clip;
+  }
+
+  h1, h2, .font-display {
+    font-family: var(--font-display);
+  }
+}
+
+/* Subtle FBC Print B-motif background pattern for landing & confirmation */
+.fbc-pattern-bg {
+  background-color: #EDF2F4;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='68' height='68' viewBox='0 0 90.13 91.82'%3E%3Cpath fill='%2326547C' fill-opacity='0.035' d='m56.86,72.95h-20.98c-9.38,0-17.01-7.63-17.01-17.01V18.87h23.38c4.26,0,8.28,2.08,10.75,5.56,2.48,3.5,3.09,7.83,1.67,11.86l-.09.24c-1.19,3.26-2.99,5.77-4.74,7.61h7.02c7.94,0,14.4,6.46,14.4,14.4s-6.46,14.4-14.4,14.4ZM22.39,22.39v33.55c0,7.44,6.05,13.49,13.49,13.49h20.98c6,0,10.88-4.88,10.88-10.88s-4.88-10.88-10.88-10.88h-17.57l4.79-3.22c1.91-1.28,5.39-4.18,7.19-9.12l.07-.21c1.03-2.94.59-6.1-1.23-8.66-1.84-2.59-4.71-4.08-7.88-4.08h-19.86Z'/%3E%3Ccircle cx='33.3' cy='36.67' r='5.42' fill='%23EF233C' fill-opacity='0.04'/%3E%3C/svg%3E");
+}
+
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}

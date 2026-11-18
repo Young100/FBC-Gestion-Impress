@@ -1,0 +1,376 @@
+ahier des charges – Plateforme de commande et d'impression FBC Print
+Version 1.0 · 15 novembre 2026 · Application web mobile-first de commande, de transfert de fichiers sans compression, de paiement manuel par mobile money et de suivi de production.
+1. Présentation du projet
+1.1 Contexte
+FBC Print est une activité de graphisme et d'impression. Aujourd'hui, les clients envoient leurs fichiers par WhatsApp ou par d'autres canaux qui compressent les images, font perdre la résolution d'origine et dispersent les informations de commande (dimensions, quantité, type d'impression). Cela provoque des allers-retours, des erreurs de production et une perte de temps.
+1.2 Objectif
+Créer une plateforme web accessible à distance, depuis un téléphone ou un ordinateur, qui permet à un client de :
+• renseigner ses coordonnées et choisir le type d'impression voulu ;
+• envoyer ses fichiers à leur résolution et leur qualité d'origine, sans aucune compression ;
+• obtenir un devis téléchargeable, puis payer par mobile money ;
+• suivre l'avancement de sa commande sans se déplacer à l'agence.
+Côté imprimeur, la plateforme centralise les commandes, les fichiers, les paiements et la production dans un espace administrateur utilisable sur ordinateur comme sur smartphone.
+1.3 Périmètre
+Inclus : formulaire de commande par type d'impression, envoi de fichiers volumineux, génération de devis et de reçu, paiement avec preuve et validation manuelle, suivi de commande, espace administrateur complet.
+Hors périmètre de la version 1 : paiement automatique par API mobile money, application mobile native, gestion de stock de matières premières, comptabilité complète.
+1.4 Définitions
+• Client : personne qui passe commande, sans obligation de créer un compte.
+• Administrateur : imprimeur ou gérant connecté à l'espace sécurisé.
+• Prestation : service imprimable avec son tarif (ex : carte de visite, kakemono).
+• Commande : ensemble des prestations choisies par un client lors d'un même passage.
+2. Identité visuelle et cohérence graphique
+L'interface reprend strictement la charte graphique FBC Print fournie.
+2.1 Logo
+Trois déclinaisons sont disponibles et doivent être utilisées selon le contexte :
+Variante
+Usage dans la plateforme
+Symbole seul (le « B » avec pastille rouge et trait turquoise)
+Favicon, icône d'application, avatar, en-tête mobile compact, filigrane en motif
+Logo horizontal (symbole + « FBC Print »)
+En-tête du site et de l'espace admin sur ordinateur, devis et reçus
+Logo vertical (symbole au-dessus du texte)
+Écran de chargement, page de connexion admin, page de confirmation de commande
+Règles : fond clair #EDF2F4 ou blanc par défaut, zone de protection autour du logo égale à la hauteur de la pastille rouge, pas de déformation, pas de changement de couleurs.
+2.2 Palette de couleurs
+Couleur
+Code
+Rôle dans l'interface
+Bleu profond
+#26547C
+Couleur principale : titres, en-têtes, boutons principaux, liens, menu actif
+Turquoise
+#119DA4
+Couleur secondaire : éléments interactifs secondaires, étapes validées, badges d'information
+Rouge
+#EF233C
+Couleur d'accent : bouton d'action principal (« Passer ma commande »), alertes importantes, notifications
+Noir
+#000000
+Texte de contenu et contrastes forts
+Gris-bleu clair
+#EDF2F4
+Arrière-plan général, cartes, champs de formulaire
+Des dégradés d'opacité de chaque couleur (de 100 % à 10 %) servent aux survols, aux fonds de badges et aux états désactivés.
+Couleurs de statut proposées, dérivées de la palette pour rester cohérentes : reçue en bleu, en vérification en turquoise clair, fichier à corriger en rouge clair, en production en turquoise, prête en bleu foncé, livrée en vert sobre, annulée en gris. Un vert de validation (par exemple #2E9E6B) peut être ajouté pour les confirmations, car aucune couleur de la charte ne signifie « réussite ».
+2.3 Typographie
+• Momo Trust Display : police du logotype, réservée aux grands titres et à la marque (titre de page d'accueil, titre de section important).
+• Epilogue : police d'accompagnement pour tout le reste (formulaires, tableaux, boutons, textes). Poids recommandés : Regular 400, Medium 500, Bold 700.
+• Repli prévu si le chargement échoue : sans-serif système.
+• Tailles minimales : 16 px pour le texte, 14 px pour les aides, afin de rester lisible sur petit écran.
+2.4 Style d'interface
+• Formes très arrondies (boutons en pastille, cartes à angles généreux), en écho aux pastilles de la charte.
+• Utilisation discrète du motif « B » répété en filigrane très clair sur les fonds de pages d'accueil et de confirmation.
+• Boutons : principal en rouge #EF233C, secondaire en bleu #26547C, tertiaire en contour turquoise.
+• Beaucoup d'espace, une seule action principale par écran, formulaire découpé en étapes.
+• Mode clair uniquement dans la version 1 (le mode sombre peut venir plus tard).
+• Documents (devis, reçu) : en-tête avec logo horizontal, bandeau bleu #26547C, accent rouge pour le total à payer, pied de page avec les coordonnées de l'entreprise.
+3. Utilisateurs et rôles
+Rôle
+Description
+Droits
+Client
+Passe commande depuis son téléphone ou son ordinateur, sans compte obligatoire
+Créer une commande, envoyer des fichiers, télécharger devis et reçu, déclarer un paiement, suivre sa commande par lien ou code
+Administrateur principal
+Gérant de FBC Print
+Tous les droits, dont tarifs, réglages, rôles et statistiques
+Opérateur (suggestion)
+Employé de l'atelier
+Voir et traiter les commandes, télécharger les fichiers, changer les statuts ; pas d'accès aux tarifs ni aux statistiques financières
+4. Parcours client
+4.1 Vue d'ensemble
+Le formulaire est présenté en étapes courtes, avec une barre de progression :
+1.  Coordonnées
+2.  Type d'impression et caractéristiques
+3.  Envoi des fichiers
+4.  Récapitulatif et validation
+5.  Devis et paiement
+6.  Suivi
+4.2 Étape 1 – Coordonnées
+• Nom complet (obligatoire).
+• Numéro de téléphone ou WhatsApp (obligatoire, format Burkina Faso +226 validé, avec possibilité d'indiquer qu'il s'agit d'un numéro WhatsApp).
+• Adresse de livraison (optionnelle) : une case « Je souhaite être livré » fait apparaître le champ d'adresse ; sinon retrait à l'agence.
+• Une même commande peut contenir plusieurs prestations ; le client peut ajouter une prestation avant de valider.
+4.3 Étape 2 – Choix du type d'impression
+Le client choisit une prestation parmi des cartes illustrées. Selon son choix, les champs suivants s'affichent.
+Grand format
+• Hauteur et largeur (champ numérique, unité cm ou m au choix).
+• Quantité.
+• Rappel de la résolution recommandée.
+Formats standards (A3, A4, A5, etc.)
+• Liste de formats : A0, A1, A2, A3, A4, A5, A6 (liste modifiable par l'administrateur).
+• Quantité.
+Portrait
+• Hauteur et largeur du fichier à imprimer.
+• Quantité.
+Kakemono
+• Dimensions standard proposées (liste gérée par l'administrateur, par exemple 80×200 cm, 85×200 cm, 100×200 cm) ou dimensions personnalisées saisies.
+• Quantité.
+Carte de visite
+• Recto seul ou recto-verso.
+• Quantité (avec paliers de quantité proposés par l'administrateur).
+• Envoi d'un fichier par face (recto, verso).
+Catalogue / brochure
+• Recto seul ou recto-verso.
+• Nombre de pages (avec règle sur les multiples de 4 si besoin pour la reliure).
+• Dimensions du format (optionnel).
+• Quantité d'exemplaires.
+Habits : polo, t-shirt, casquette
+• Type d'impression : sublimation ou DTF.
+• Type d'article : polo, t-shirt ou casquette.
+• Disposition : poitrine gauche, poitrine droite, les deux poitrines, poitrine + dos, les deux poitrines avec dos.
+• Envoi du modèle de l'habit et d'une maquette des dispositions (fichiers d'illustration).
+• Envoi des fichiers d'impression séparés selon la disposition : seuls les emplacements concernés par le choix s'affichent (poitrine gauche, poitrine droite, dos).
+• Quantité par taille (S, M, L, XL, etc.) en option, selon l'activité.
+Maillot
+• Nom à imprimer au dos et numéro.
+• Nom de l'équipe et année de sortie du maillot (pour identifier le modèle).
+• Qualité du maillot (choix parmi des niveaux définis par l'administrateur).
+• Quantité, avec possibilité d'ajouter plusieurs lignes nom/numéro/taille pour une commande d'équipe.
+Étiquettes
+• Dimensions du fichier.
+• Quantité.
+Pour toutes les prestations, un champ « Remarques » libre permet de préciser un besoin particulier (délai, finition, papier).
+4.4 Étape 3 – Envoi des fichiers
+• Formats acceptés : .zip, .pdf, .svg, .jpg, .jpeg, .png, .AI, .PSD, .eps, .tiff, .cdr (liste extensible par l'administrateur).
+• Envoi multiple avec glisser-déposer sur ordinateur et sélecteur de fichiers sur téléphone.
+• Barre de progression par fichier avec nom, poids et vitesse.
+• Reprise automatique en cas de coupure réseau (voir section 5).
+• Message clair : « Vos fichiers sont envoyés sans aucune compression. »
+• Possibilité de supprimer et de remplacer un fichier avant la validation.
+• Avertissement non bloquant si le fichier paraît trop léger pour la taille demandée (résolution estimée insuffisante).
+4.5 Étape 4 – Récapitulatif et validation
+• Résumé complet : coordonnées, prestations, dimensions, quantités, fichiers envoyés.
+• Possibilité de modifier chaque ligne.
+• Case d'acceptation des conditions de commande (délais, retouches, fichiers conformes).
+• Bouton rouge « Passer ma commande ».
+• À la validation : attribution d'un numéro de commande unique (par exemple CMD-2026-0042) et d'un code de suivi.
+4.6 Étape 5 – Devis et paiement
+• Génération immédiate d'un devis PDF téléchargeable (logo, coordonnées client, détail des prestations, quantités, prix unitaires, total, durée de validité, conditions).
+• Deux boutons : Télécharger le devis et Payer maintenant (le client peut aussi payer plus tard depuis la page de suivi).
+• Le bouton « Payer maintenant » mène à une page de paiement :
+    ◦ liste des moyens de paiement (Orange Money, Moov Money, Wave, Coris Money, Sank Money, Telecel Money, etc.) avec, pour chacun, le numéro, le nom du titulaire et les instructions ;
+    ◦ champ numéro de dépôt (numéro depuis lequel le client a payé) ;
+    ◦ champ référence de transaction (optionnel mais recommandé) ;
+    ◦ téléversement de la capture d'écran du paiement ;
+    ◦ bouton Envoyer.
+• Après envoi, le statut du paiement passe à « en attente de validation ».
+• Une fois le paiement validé par l'administrateur, le statut devient « payé » et le client peut télécharger son reçu de paiement.
+• Option proposée : paiement d'un acompte (par exemple 70 %) puis du solde à la livraison, selon la politique de l'entreprise.
+4.7 Étape 6 – Suivi de commande à distance
+Le client accède à sa commande sans se déplacer, par :
+• un lien privé reçu à la validation (et envoyé sur WhatsApp si possible) ;
+• ou en saisissant son numéro de commande et son numéro de téléphone.
+La page de suivi affiche :
+• une frise d'avancement : reçue → paiement confirmé → en production → prête → livrée ;
+• le statut de paiement (non payé, en attente de validation, payé, rejeté avec motif) ;
+• le récapitulatif de la commande ;
+• les boutons de téléchargement du devis et du reçu (une fois payé) ;
+• un bouton pour déclarer ou compléter le paiement ;
+• un message de l'imprimeur si un fichier est à corriger, avec bouton de renvoi ;
+• un bouton WhatsApp pour contacter l'agence en un clic.
+5. Envoi des fichiers sans compression (exigence clé)
+5.1 Principes
+• Les fichiers sont envoyés directement du téléphone du client vers un stockage cloud, sans passer par le serveur de l'application, ce qui évite les limites de taille et de durée.
+• Aucune compression, aucun redimensionnement, aucune conversion n'est appliqué au fichier d'origine. L'original est conservé octet pour octet.
+• Les miniatures d'aperçu sont générées séparément ; elles ne remplacent jamais l'original.
+5.2 Envoi par morceaux avec reprise
+• Technique d'envoi fractionné (« resumable upload ») : en cas de coupure de réseau, l'envoi reprend là où il s'est arrêté.
+• Possibilité de mettre en pause et de reprendre.
+• Plusieurs fichiers envoyés en parallèle (limite raisonnable, par exemple 3).
+5.3 Contrôles
+• Taille maximale par fichier : à fixer (suggestion : 1 Go) et affichée clairement au client.
+• Refus des fichiers vides, corrompus ou dont l'extension n'est pas autorisée.
+• Vérification d'intégrité (somme de contrôle) entre le fichier envoyé et le fichier reçu.
+• Les noms de fichiers sont conservés tels quels pour l'administrateur ; l'application leur attache un identifiant interne.
+5.4 Contrôle de qualité automatique (suggestion)
+À la réception d'une image ou d'un PDF, l'application extrait et affiche à l'administrateur :
+• les dimensions en pixels et, pour les PDF, en centimètres ;
+• la résolution estimée (DPI) par rapport à la taille demandée ;
+• le mode colorimétrique (RVB ou CMJN) ;
+• une alerte lorsque la qualité est trop faible pour l'impression demandée.
+Les fichiers .AI et .PSD sont conservés intacts ; l'aperçu peut ne pas être disponible pour ces formats, ce qui est signalé.
+5.5 Stockage et sécurité des fichiers
+• Les fichiers ne sont jamais publics : accès par liens temporaires signés ou par droits d'administration.
+• Seuls le client (via son lien de suivi) et les administrateurs voient les fichiers d'une commande.
+• Durée de conservation configurable (suggestion : suppression automatique 90 jours après livraison, avec avertissement préalable et possibilité de prolonger).
+6. Devis et documents
+6.1 Calcul du devis
+Le prix est calculé à partir des tarifs saisis par l'administrateur, selon la prestation :
+• au mètre carré pour le grand format ;
+• au format pour A3, A4, A5 ;
+• à l'unité ou par palier de quantité pour les cartes de visite, étiquettes, kakemonos ;
+• par article et par emplacement pour les habits (selon sublimation ou DTF et le nombre d'emplacements) ;
+• par niveau de qualité pour les maillots ;
+• au nombre de pages et d'exemplaires pour les catalogues.
+Sont gérés en plus : frais de livraison par zone, majoration urgence, remise éventuelle.
+Les montants sont en francs CFA (FCFA), formatés avec séparateur de milliers.
+6.2 Documents générés
+• Devis (PDF) : numéro, date, validité, coordonnées client, lignes de prestation, total, conditions.
+• Reçu de paiement (PDF) : généré uniquement après validation du paiement par l'administrateur, avec numéro de reçu, montant payé, moyen de paiement, date.
+• Les deux documents reprennent l'identité visuelle de la section 2.
+• Numérotation continue et unique ; aucun numéro réutilisé.
+7. Espace administrateur
+Accessible par connexion sécurisée, sur ordinateur et sur smartphone (interface adaptée aux deux).
+7.1 Tableau de bord
+• Compteurs : nouvelles commandes, paiements à valider, commandes en production, commandes prêtes à remettre, commandes en retard.
+• Chiffre d'affaires du jour, de la semaine et du mois.
+• Liste des dernières commandes avec accès rapide.
+• Vue « à produire aujourd'hui » classée par date de livraison promise et par urgence.
+• Alertes : fichier de mauvaise qualité, paiement sans capture, doublon de numéro de dépôt.
+7.2 Gestion des commandes
+• Liste avec recherche et filtres (date, statut, type d'impression, statut de paiement, client).
+• Fiche de commande complète : coordonnées du client, choix détaillés, fichiers, paiement, historique.
+• Statuts personnalisables : reçue, en vérification, fichier à corriger, en attente de paiement, payée, en production, prête, livrée, annulée.
+• Historique horodaté de chaque changement de statut avec l'auteur.
+• Notes internes, invisibles pour le client.
+• Date de livraison promise et marqueur « urgent ».
+• Modification d'une commande (quantité, dimensions) avec recalcul du devis et conservation de l'ancienne version.
+• Annulation motivée.
+• Création d'une commande manuelle (client venu à l'agence ou commande reçue par téléphone).
+7.3 Gestion des fichiers
+• Téléchargement fichier par fichier ou en un seul zip pour toute la commande, sur PC comme sur smartphone.
+• Aperçu rapide des images et PDF sans téléchargement.
+• Affichage des informations techniques (dimensions, DPI, mode colorimétrique, poids).
+• Bouton « Fichier à corriger » : l'administrateur écrit le motif, le client reçoit la demande sur sa page de suivi et par notification.
+• Gestion des versions : un fichier renvoyé par le client n'efface pas l'ancien, il s'ajoute.
+7.4 Gestion des paiements
+• Liste des paiements en attente avec la capture d'écran, le numéro de dépôt, la référence et le montant attendu.
+• Boutons Valider et Rejeter (le rejet demande un motif visible par le client : capture illisible, montant incorrect, etc.).
+• Détection des doublons de numéro de dépôt ou de référence.
+• Gestion des paiements partiels : acompte, solde, reste à payer.
+• Génération automatique du reçu à la validation.
+• Gestion des moyens de paiement : ajout, modification, activation ou désactivation d'un opérateur, de son numéro, du nom du titulaire et des instructions affichées au client.
+• Journal de validation (qui a validé, quand).
+7.5 Onglet Prestations et tarifs
+• Ajouter, modifier, supprimer ou désactiver une prestation (désactiver évite de perdre l'historique des anciennes commandes).
+• Pour chaque prestation : nom, description, image, mode de calcul du prix, champs demandés au client, formats et dimensions standard, options (recto/verso, sublimation/DTF, qualité de maillot).
+• Paliers de prix par quantité (par exemple cartes de visite : 100, 250, 500, 1 000).
+• Majoration d'urgence et frais de livraison par zone.
+• Au démarrage, les prestations listées dans la section 4.3 sont créées ; les prix sont saisis par l'administrateur.
+7.6 Gestion des clients
+• Fiche client avec historique des commandes, total dépensé et date de dernière commande.
+• Recherche par nom ou numéro.
+• Possibilité de rouvrir ou de dupliquer une ancienne commande pour une réimpression (utile pour cartes de visite, étiquettes, maillots d'équipe).
+• Notes sur le client (préférences, délais habituels).
+7.7 Communication avec le client
+• Lien WhatsApp direct depuis chaque commande, avec un message pré-rempli (« Bonjour, votre commande CMD-… est prête »).
+• Modèles de messages pour les cas fréquents : commande reçue, fichier à corriger, paiement validé, commande prête, commande livrée.
+• Notification instantanée à l'administrateur (Telegram ou WhatsApp) à chaque nouvelle commande et à chaque paiement déclaré.
+• Notifications dans l'application (cloche) avec compteur.
+7.8 Statistiques et rapports
+• Chiffre d'affaires par période, par type d'impression et par moyen de paiement.
+• Nombre de commandes par statut.
+• Prestations les plus demandées.
+• Clients les plus réguliers.
+• Délai moyen entre la commande et la livraison.
+• Export des commandes et des paiements en Excel ou CSV.
+7.9 Réglages de la boutique
+• Coordonnées de l'entreprise (nom, adresse, téléphone, WhatsApp, e-mail, réseaux), utilisées dans les documents.
+• Logo (changement possible à tout moment) et variantes.
+• Horaires d'ouverture et fermeture temporaire des commandes (message d'indisponibilité affiché aux clients).
+• Liste des extensions de fichiers acceptées et taille maximale.
+• Durée de validité des devis et durée de conservation des fichiers.
+• Conditions de commande et mentions affichées au client.
+• Politique d'acompte (pourcentage, ou aucune).
+7.10 Sécurité et rôles
+• Connexion administrateur protégée par mot de passe robuste ; double authentification recommandée.
+• Gestion de plusieurs administrateurs avec rôles (administrateur principal, opérateur).
+• Journal des actions sensibles (validation de paiement, modification de tarifs, suppression).
+• Déconnexion automatique après inactivité.
+8. Statuts de commande et de paiement
+8.1 Statut de commande
+Reçue → En vérification → (Fichier à corriger) → En production → Prête → Livrée. Une commande peut passer à Annulée à tout moment avant livraison.
+8.2 Statut de paiement
+Non payé → En attente de validation → Payé (ou Rejeté avec motif, retour à Non payé). En cas d'acompte : Partiellement payé.
+Le reçu n'est disponible qu'à l'état Payé ou Partiellement payé pour le montant validé.
+9. Modèle de données (vue d'ensemble)
+Base de données proposée, compatible avec Firestore :
+• clients : nom, téléphone, WhatsApp, adresse, dates de création et de dernière commande.
+• commandes : numéro, code de suivi, client, statut, statut de paiement, total, acompte, date promise, urgence, adresse de livraison, notes internes, dates.
+• lignes_commande : commande, prestation, caractéristiques (dimensions, quantité, recto/verso, disposition, nom/numéro de maillot…), prix unitaire, sous-total.
+• fichiers : commande, ligne concernée, emplacement (recto, verso, poitrine gauche…), nom d'origine, chemin de stockage, poids, extension, dimensions, DPI, mode colorimétrique, somme de contrôle, version.
+• paiements : commande, moyen, numéro de dépôt, référence, montant déclaré, capture, statut, motif de rejet, validé par, date.
+• prestations : nom, mode de calcul, options, paliers de prix, actif.
+• moyens_paiement : opérateur, numéro, titulaire, instructions, actif.
+• documents : devis et reçus (numéro, type, commande, chemin du PDF, date).
+• historique_statuts : commande, ancien et nouveau statut, auteur, date.
+• utilisateurs_admin : e-mail, rôle, dernière connexion.
+• réglages : coordonnées, logo, extensions, tailles, durées, conditions.
+10. Exigences non fonctionnelles
+10.1 Performance et réseau
+• Conception mobile-first, avec chargement léger des pages (images optimisées, pas de fichiers lourds dans l'interface).
+• Adaptée aux connexions instables : reprise d'envoi, messages d'état clairs, aucune perte de la saisie en cas de coupure (sauvegarde du brouillon dans le navigateur).
+• Interface fluide sur smartphones d'entrée de gamme.
+10.2 Disponibilité et sauvegarde
+• Accessible à distance 24 h sur 24.
+• Sauvegarde régulière de la base de données et des documents.
+10.3 Sécurité et confidentialité
+• Communication chiffrée (HTTPS).
+• Règles d'accès strictes à la base et au stockage : un client ne voit que sa propre commande.
+• Protection contre les envois abusifs (limitation du nombre de commandes et de fichiers par période, vérification anti-robot).
+• Liens de téléchargement temporaires.
+• Données personnelles limitées au strict nécessaire (nom, contact, adresse optionnelle) ; politique de confidentialité et mentions adaptées aux règles du Burkina Faso.
+10.4 Compatibilité
+• Navigateurs mobiles récents (Chrome, Safari, navigateurs Android courants) et navigateurs de bureau.
+• Interface en français (anglais possible plus tard).
+10.5 Accessibilité et ergonomie
+• Contrastes respectés (texte noir ou bleu foncé sur fond clair, texte blanc sur bleu et rouge).
+• Zones tactiles d'au moins 44 px.
+• Messages d'erreur précis, à côté du champ concerné.
+11. Règles de gestion
+1.  Une commande ne peut être validée que si les champs obligatoires de la prestation sont remplis et si les fichiers requis ont été envoyés.
+2.  Pour les habits, seuls les emplacements correspondant à la disposition choisie demandent un fichier, et tous sont obligatoires.
+3.  Un devis garde ses prix même si les tarifs changent ensuite, jusqu'à la fin de sa validité.
+4.  Le reçu n'est généré qu'après validation du paiement par un administrateur.
+5.  Un paiement rejeté n'efface pas la preuve : elle reste dans l'historique.
+6.  Un fichier remplacé est conservé en ancienne version et marqué comme remplacé.
+7.  Un client peut avoir plusieurs commandes ; chaque commande a son propre suivi.
+8.  Une prestation désactivée disparaît du formulaire mais reste visible dans les anciennes commandes.
+9.  Toute modification de statut est horodatée et attribuée à son auteur.
+12. Plan de réalisation par phases
+Phase 1 – Socle de commande (priorité maximale)
+• Identité visuelle appliquée (couleurs, polices, logo).
+• Formulaire en étapes pour tous les types d'impression.
+• Envoi de fichiers sans compression, avec reprise et progression.
+• Numéro de commande et code de suivi.
+• Espace admin de base : liste des commandes, fiche, téléchargement des fichiers, changement de statut.
+Phase 2 – Devis et paiement
+• Onglet Prestations et tarifs.
+• Calcul automatique et devis PDF.
+• Page de paiement mobile money avec numéro de dépôt et capture.
+• Validation ou rejet des paiements, reçu PDF.
+• Notification instantanée à l'administrateur.
+Phase 3 – Suivi et communication
+• Page de suivi client à distance avec frise d'avancement.
+• Demande de correction de fichier et renvoi.
+• Modèles de messages et liens WhatsApp.
+• Fiche client et réimpression en un clic.
+Phase 4 – Pilotage et renforcement
+• Contrôle de qualité automatique des fichiers.
+• Statistiques et exports.
+• Rôles multiples et journal d'actions.
+• Suppression automatique des anciens fichiers.
+• Réglages avancés (fermeture temporaire, frais de livraison par zone).
+13. Critères de recette
+Le projet est accepté lorsque les points suivants sont vérifiés :
+• Un fichier de plusieurs centaines de Mo envoyé depuis un téléphone est retrouvé identique (même poids, même somme de contrôle, même résolution) chez l'administrateur.
+• Une coupure réseau pendant l'envoi n'oblige pas à recommencer.
+• Chaque type d'impression affiche exactement les champs prévus en section 4.3.
+• Les cas habits (cinq dispositions) demandent les bons fichiers séparés.
+• Le devis PDF est généré avec les bons montants et l'identité FBC Print.
+• Le client peut déclarer un paiement avec numéro de dépôt et capture, l'administrateur peut le valider ou le rejeter, et le reçu n'apparaît qu'après validation.
+• Le client suit sa commande à distance avec son lien ou son numéro.
+• L'administrateur ajoute, modifie et supprime une prestation sans intervention technique.
+• L'espace admin est entièrement utilisable sur smartphone.
+• Les couleurs, polices et logos correspondent à la charte fournie.
+14. Points à confirmer
+• Taille maximale acceptée par fichier et durée de conservation des fichiers.
+• Tarifs de départ de chaque prestation et paliers de quantité.
+• Politique d'acompte (pourcentage ou paiement intégral).
+• Liste définitive des opérateurs de paiement, des numéros et des titulaires.
+• Zones et frais de livraison.
+• Canal de notification de l'administrateur : Telegram ou WhatsApp.
+• Nombre d'administrateurs et d'opérateurs prévus.
+• Nom de domaine et hébergement choisis pour la mise en ligne.
+• Textes légaux : conditions de commande, politique de confidentialité.
