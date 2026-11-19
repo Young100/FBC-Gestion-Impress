@@ -5,6 +5,8 @@ import {
   ArrowRight,
   Check,
   CheckCircle2,
+  ChevronDown,
+  ChevronUp,
   Copy,
   Download,
   FileCheck2,
@@ -158,6 +160,7 @@ export const OrderWizard: React.FC<OrderWizardProps> = ({
   const [createdOrder, setCreatedOrder] = useState<Order | null>(null);
   const [showPaymentBox, setShowPaymentBox] = useState(false);
   const [copiedTracking, setCopiedTracking] = useState(false);
+  const [showStickyBreakdown, setShowStickyBreakdown] = useState(false);
 
   // Load draft or reprint prefill
   useEffect(() => {
@@ -630,6 +633,37 @@ export const OrderWizard: React.FC<OrderWizardProps> = ({
     (totalAmount * (settings.depositPercent || 70)) / 100
   );
 
+  // Real-time floating estimate across steps 1-4
+  const liveItemsSubtotal = useMemo(() => {
+    if (cartItems.length > 0) return subtotal;
+    if (step === 2 && draftItemPreview) return draftItemPreview.subtotal;
+    return 0;
+  }, [cartItems.length, subtotal, step, draftItemPreview]);
+
+  const liveUrgentFee = urgent
+    ? Math.round((liveItemsSubtotal * (settings.urgentSurchargePercent || 25)) / 100)
+    : 0;
+  const liveEstimatedTotal = liveItemsSubtotal + deliveryFee + liveUrgentFee;
+  const liveDepositAmount = Math.round(
+    (liveEstimatedTotal * (settings.depositPercent || 70)) / 100
+  );
+  const liveItemsCount =
+    cartItems.length > 0
+      ? cartItems.length
+      : step === 2 && currentService
+        ? isApparelSlug(currentService.slug)
+          ? selectedApparelTypes.length
+          : 1
+        : 0;
+  const stepProgressPercent = Math.min(100, step * 25);
+  const stepShortTitles: Record<1 | 2 | 3 | 4 | 5, string> = {
+    1: 'Coordonnées',
+    2: 'Impression',
+    3: 'Fichiers',
+    4: 'Validation',
+    5: 'Confirmation',
+  };
+
   // Final Order Submission
   const handleFinalSubmit = async () => {
     setSubmitError(null);
@@ -905,52 +939,6 @@ export const OrderWizard: React.FC<OrderWizardProps> = ({
       {/* STEP 2: Print Type & Dynamic Specifications */}
       {step === 2 && currentService && (
         <div className="space-y-6">
-          {/* Active Cart Banner if multiple prestations */}
-          {cartItems.length > 0 && (
-            <div className="bg-white rounded-3xl p-5 border border-[#119DA4]/40 shadow-sm space-y-3">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2 font-bold text-[#26547C]">
-                  <ShoppingBag className="w-5 h-5 text-[#119DA4]" />
-                  Panier de commande ({cartItems.length} prestation
-                  {cartItems.length > 1 ? 's' : ''})
-                </div>
-                <span className="font-bold text-[#26547C] tabular-nums">
-                  {formatFcfa(subtotal)}
-                </span>
-              </div>
-              <div className="divide-y divide-slate-100">
-                {cartItems.map((it) => (
-                  <div
-                    key={it.itemId}
-                    className="py-2 flex items-center justify-between gap-3 text-sm"
-                  >
-                    <div>
-                      <span className="font-semibold text-[#26547C]">
-                        {it.serviceName}
-                      </span>{' '}
-                      <span className="text-slate-600">— {it.summaryText}</span>
-                    </div>
-                    <div className="flex items-center gap-3 shrink-0">
-                      <span className="font-bold tabular-nums">
-                        {formatFcfa(it.subtotal)}
-                      </span>
-                      <button
-                        type="button"
-                        onClick={() =>
-                          setCartItems((prev) => prev.filter((x) => x.itemId !== it.itemId))
-                        }
-                        className="p-2 text-slate-400 hover:text-[#EF233C]"
-                        aria-label="Supprimer la prestation"
-                      >
-                        <Trash2 className="w-4 h-4" />
-                      </button>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-
           <div className="bg-white rounded-3xl p-6 sm:p-8 border border-slate-200 shadow-sm space-y-6">
             <div>
               <h1 className="font-display text-2xl sm:text-3xl text-[#26547C]">
@@ -1836,6 +1824,54 @@ export const OrderWizard: React.FC<OrderWizardProps> = ({
               )}
             </div>
 
+            {/* Active Cart Summary directly below Add to Cart */}
+            {cartItems.length > 0 && (
+              <div className="rounded-2xl p-4 sm:p-5 bg-[#EDF2F4]/70 border border-[#119DA4]/35 space-y-3 min-w-0">
+                <div className="flex items-center justify-between gap-3">
+                  <div className="flex items-center gap-2 font-bold text-[#26547C] text-sm sm:text-base min-w-0">
+                    <ShoppingBag className="w-5 h-5 text-[#119DA4] shrink-0" />
+                    <span className="truncate">
+                      Panier de commande ({cartItems.length} prestation
+                      {cartItems.length > 1 ? 's' : ''})
+                    </span>
+                  </div>
+                  <span className="font-bold text-[#26547C] tabular-nums shrink-0">
+                    {formatFcfa(subtotal)}
+                  </span>
+                </div>
+                <div className="divide-y divide-slate-200/80">
+                  {cartItems.map((it) => (
+                    <div
+                      key={it.itemId}
+                      className="py-2.5 first:pt-1 last:pb-0 flex items-center justify-between gap-3 text-sm min-w-0"
+                    >
+                      <div className="min-w-0 flex-1">
+                        <span className="font-semibold text-[#26547C]">
+                          {it.serviceName}
+                        </span>{' '}
+                        <span className="text-slate-600 break-words">— {it.summaryText}</span>
+                      </div>
+                      <div className="flex items-center gap-2 sm:gap-3 shrink-0">
+                        <span className="font-bold tabular-nums text-[#26547C]">
+                          {formatFcfa(it.subtotal)}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setCartItems((prev) => prev.filter((x) => x.itemId !== it.itemId))
+                          }
+                          className="p-2 text-slate-400 hover:text-[#EF233C] transition-colors min-h-[40px] min-w-[40px] flex items-center justify-center"
+                          aria-label="Supprimer la prestation"
+                        >
+                          <Trash2 className="w-4 h-4" />
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
             {step2Error && (
               <p className="text-sm font-medium text-[#EF233C]">{step2Error}</p>
             )}
@@ -2264,6 +2300,144 @@ export const OrderWizard: React.FC<OrderWizardProps> = ({
               {submittingOrder && <Loader2 className="w-5 h-5 animate-spin" />}
               Passer ma commande
             </button>
+          </div>
+        </div>
+      )}
+
+      {/* Floating Bottom Progress & Real-Time Estimate Bar (Steps 1-4) */}
+      {step <= 4 && (
+        <div className="sticky bottom-3 z-30">
+          <div className="bg-white/95 backdrop-blur-md border border-slate-200/90 shadow-lg shadow-slate-900/10 rounded-2xl overflow-hidden">
+            {/* Step Progress Track */}
+            <div className="h-1 w-full bg-slate-200/80 overflow-hidden">
+              <div
+                className="h-full w-full bg-[#119DA4] origin-left transition-transform duration-300 ease-out"
+                style={{ transform: `scaleX(${stepProgressPercent / 100})` }}
+              />
+            </div>
+
+            {/* Expandable Breakdown Drawer */}
+            {showStickyBreakdown && (
+              <div className="px-4 sm:px-5 py-3 bg-[#EDF2F4]/70 border-b border-slate-200/80 space-y-1.5 text-xs sm:text-sm">
+                <div className="flex items-center justify-between gap-2 text-slate-700">
+                  <span>
+                    Prestations{' '}
+                    {liveItemsCount > 0
+                      ? `(${liveItemsCount} ${liveItemsCount > 1 ? 'éléments' : 'élément'})`
+                      : '(à configurer à l’étape 2)'}
+                  </span>
+                  <span className="font-semibold text-[#26547C] tabular-nums">
+                    {formatFcfa(liveItemsSubtotal)}
+                  </span>
+                </div>
+
+                {step === 2 &&
+                  cartItems.length > 0 &&
+                  draftItemPreview &&
+                  draftItemPreview.subtotal > 0 && (
+                    <div className="flex items-center justify-between gap-2 text-slate-500 text-xs">
+                      <span className="truncate">
+                        Prestation en cours (non ajoutée au panier)
+                      </span>
+                      <span className="tabular-nums shrink-0">
+                        + {formatFcfa(draftItemPreview.subtotal)}
+                      </span>
+                    </div>
+                  )}
+
+                <div className="flex items-center justify-between gap-2 text-slate-700">
+                  <span className="truncate">
+                    {wantsDelivery && selectedZone
+                      ? `Livraison (${selectedZone.name})`
+                      : 'Retrait à l’agence FBC Print'}
+                  </span>
+                  <span className="font-semibold text-[#26547C] tabular-nums shrink-0">
+                    {deliveryFee > 0 ? formatFcfa(deliveryFee) : 'Gratuit'}
+                  </span>
+                </div>
+
+                {urgent && (
+                  <div className="flex items-center justify-between gap-2 text-[#EF233C]">
+                    <span>
+                      Traitement urgent (+{settings.urgentSurchargePercent || 25}%)
+                    </span>
+                    <span className="font-semibold tabular-nums shrink-0">
+                      {liveUrgentFee > 0 ? formatFcfa(liveUrgentFee) : 'Selon prestations'}
+                    </span>
+                  </div>
+                )}
+
+                {liveEstimatedTotal > 0 && (
+                  <div className="pt-1.5 border-t border-slate-300/70 flex items-center justify-between gap-2 text-xs text-slate-600">
+                    <span>Acompte indicatif ({settings.depositPercent || 70}%)</span>
+                    <span className="font-semibold text-[#119DA4] tabular-nums">
+                      {formatFcfa(liveDepositAmount)}
+                    </span>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Compact Main Bar */}
+            <div className="px-4 sm:px-5 py-2.5 sm:py-3 flex items-center justify-between gap-3">
+              <div className="min-w-0 flex-1">
+                <div className="flex items-center gap-2 text-xs text-slate-600">
+                  <span className="font-bold text-[#26547C] whitespace-nowrap">
+                    Étape {step}/4 · {stepShortTitles[step]}
+                  </span>
+                  <span className="hidden sm:inline text-slate-300" aria-hidden="true">
+                    ·
+                  </span>
+                  <span className="hidden sm:inline truncate">
+                    {liveItemsCount > 0
+                      ? `${liveItemsCount} prestation${liveItemsCount > 1 ? 's' : ''}`
+                      : 'Configuration en attente'}
+                    {wantsDelivery && deliveryFee > 0
+                      ? ` · Livraison +${formatFcfa(deliveryFee)}`
+                      : ''}
+                    {urgent ? ` · Urgent +${settings.urgentSurchargePercent}%` : ''}
+                  </span>
+                </div>
+
+                <div className="sm:hidden text-[11px] text-slate-500 truncate mt-0.5">
+                  {liveItemsCount > 0
+                    ? `${liveItemsCount} prestation${liveItemsCount > 1 ? 's' : ''}`
+                    : 'Tarif calculé à l’étape 2'}
+                  {wantsDelivery && deliveryFee > 0 ? ' · Livraison' : ''}
+                  {urgent ? ' · Urgent' : ''}
+                </div>
+              </div>
+
+              <div className="flex items-center gap-2 sm:gap-3 shrink-0">
+                <div className="text-right">
+                  <span className="block text-[10px] sm:text-xs text-slate-500 leading-none">
+                    Total estimé
+                  </span>
+                  <span className="text-base sm:text-xl font-bold text-[#26547C] tabular-nums leading-tight">
+                    {formatFcfa(liveEstimatedTotal)}
+                  </span>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => setShowStickyBreakdown((v) => !v)}
+                  aria-expanded={showStickyBreakdown}
+                  aria-label={
+                    showStickyBreakdown
+                      ? 'Masquer le détail de l’estimation'
+                      : 'Afficher le détail de l’estimation'
+                  }
+                  className="inline-flex items-center justify-center gap-1 px-2.5 sm:px-3 py-1.5 rounded-xl bg-[#EDF2F4] hover:bg-slate-200/80 text-[#26547C] text-xs font-semibold transition-colors min-h-[40px]"
+                >
+                  <span className="hidden sm:inline">Détail</span>
+                  {showStickyBreakdown ? (
+                    <ChevronDown className="w-4 h-4" />
+                  ) : (
+                    <ChevronUp className="w-4 h-4" />
+                  )}
+                </button>
+              </div>
+            </div>
           </div>
         </div>
       )}
