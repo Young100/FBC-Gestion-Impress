@@ -23,6 +23,9 @@ const SESSION_SECRET_FILE = path.join(UPLOADS_ROOT, '.staff_session_secret');
 const STAFF_COOKIE_NAME = 'fbc_staff_session';
 const SESSION_TTL_MS = 12 * 60 * 60 * 1000;
 const BOOTSTRAPPED_ADMIN_EMAIL = 'ouattaraabdoulaye479@gmail.com';
+const ALLOWED_ORIGINS = new Set([
+  'https://fbc-print.onrender.com',
+]);
 
 fs.mkdirSync(FILES_DIR, { recursive: true });
 
@@ -542,6 +545,23 @@ function computeFileSha256(filePath: string): Promise<string> {
 async function startServer() {
   const app = express();
   app.set('trust proxy', true);
+  app.use((req, res, next) => {
+    const origin = req.headers.origin;
+    if (origin && ALLOWED_ORIGINS.has(origin)) {
+      res.setHeader('Access-Control-Allow-Origin', origin);
+      res.setHeader('Access-Control-Allow-Credentials', 'true');
+      res.setHeader(
+        'Access-Control-Allow-Headers',
+        'Content-Type, Authorization, X-Staff-Session'
+      );
+      res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS');
+      if (req.method === 'OPTIONS') {
+        res.status(204).end();
+        return;
+      }
+    }
+    next();
+  });
   app.use(express.json({ limit: '4mb' }));
 
   app.get('/api/health', (_req, res) => {
