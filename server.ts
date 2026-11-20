@@ -6,16 +6,16 @@ import { createRequire } from 'module';
 import imageSize from 'image-size';
 import { PDFDocument } from 'pdf-lib';
 import { createServer as createViteServer } from 'vite';
-import { getApps, initializeApp } from 'firebase-admin/app';
+import { cert, getApps, initializeApp } from 'firebase-admin/app';
 import { getAuth } from 'firebase-admin/auth';
-import { FieldValue, getFirestore, Timestamp } from 'firebase-admin/firestore';
+import { FieldValue, initializeFirestore, Timestamp } from 'firebase-admin/firestore';
 
 const require = createRequire(import.meta.url);
 const { ZipArchive } = require('archiver') as {
   ZipArchive: new (options?: import('archiver').ArchiverOptions) => import('archiver').Archiver;
 };
 
-const PORT = 3000;
+const PORT = Number(process.env.PORT) || 3000;
 const UPLOADS_ROOT = path.resolve(process.cwd(), 'uploads');
 const FILES_DIR = path.join(UPLOADS_ROOT, 'files');
 const INDEX_FILE = path.join(UPLOADS_ROOT, 'index.json');
@@ -33,11 +33,29 @@ const firebaseConfig = JSON.parse(
   fs.readFileSync(path.resolve(process.cwd(), 'firebase-applet-config.json'), 'utf-8')
 ) as { projectId: string; firestoreDatabaseId?: string };
 
-const adminApp = getApps()[0] ?? initializeApp({ projectId: firebaseConfig.projectId });
+function initFirebaseAdminApp() {
+  if (getApps().length > 0) return getApps()[0];
+  const rawServiceAccount = process.env.FIREBASE_SERVICE_ACCOUNT_JSON?.trim();
+  if (rawServiceAccount) {
+    try {
+      const parsed = JSON.parse(rawServiceAccount);
+      return initializeApp({
+        credential: cert(parsed),
+        projectId: firebaseConfig.projectId,
+      });
+    } catch (err) {
+      console.error('Invalid FIREBASE_SERVICE_ACCOUNT_JSON, falling back to ADC:', err);
+    }
+  }
+  return initializeApp({ projectId: firebaseConfig.projectId });
+}
+
+const adminApp = initFirebaseAdminApp();
 const adminAuth = getAuth(adminApp);
-const adminDb = firebaseConfig.firestoreDatabaseId
-  ? getFirestore(adminApp, firebaseConfig.firestoreDatabaseId)
-  : getFirestore(adminApp);
+const adminDb =
+  firebaseConfig.firestoreDatabaseId && firebaseConfig.firestoreDatabaseId !== '(default)'
+    ? initializeFirestore(adminApp, { preferRest: true }, firebaseConfig.firestoreDatabaseId)
+    : initializeFirestore(adminApp, { preferRest: true });
 
 function getSessionSecret(): string {
   const envSecret = process.env.STAFF_SESSION_SECRET?.trim();
@@ -271,6 +289,24 @@ function sanitizeServerFirestore<T>(value: T): T {
   return value;
 }
 
+function withTimeout<T>(promise: Promise<T>, ms = 15000, label = 'Firestore'): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error(`TIMEOUT_${label}`));
+    }, ms);
+    promise.then(
+      (val) => {
+        clearTimeout(timer);
+        resolve(val);
+      },
+      (err) => {
+        clearTimeout(timer);
+        reject(err);
+      }
+    );
+  });
+}
+
 function isFirestoreIamError(err: unknown): boolean {
   if (!err || typeof err !== 'object') return false;
   const code = (err as { code?: unknown }).code;
@@ -279,15 +315,24 @@ function isFirestoreIamError(err: unknown): boolean {
     code === 7 ||
     code === 'permission-denied' ||
     msg.includes('PERMISSION_DENIED') ||
-    msg.includes('Missing or insufficient permissions')
+    msg.includes('Missing or insufficient permissions') ||
+    msg.includes('Could not load the default credentials')
   );
 }
 
 function handleServerApiError(res: express.Response, err: unknown, fallbackMsg: string) {
   console.error(fallbackMsg, err);
+  if (res.headersSent) return;
+  const msg = err instanceof Error ? err.message : String(err);
+  if (msg.startsWith('TIMEOUT_')) {
+    res.status(504).json({
+      error: `Délai de réponse dépassé lors de la communication avec Firestore (${firebaseConfig.projectId}). Vérifiez les identifiants serveur ou réessayez.`,
+    });
+    return;
+  }
   if (isFirestoreIamError(err)) {
     res.status(503).json({
-      error: `Accès Firestore côté serveur non autorisé sur le projet ${firebaseConfig.projectId}. Vérifiez que le rôle Cloud Datastore User (roles/datastore.user) est bien attribué dans IAM.`,
+      error: `Accès Firestore côté serveur non autorisé sur le projet ${firebaseConfig.projectId}. Vérifiez que les identifiants serveur et le rôle roles/datastore.user sont bien configurés.`,
     });
     return;
   }
@@ -991,7 +1036,11 @@ async function startServer() {
         return;
       }
 
-      const accessId = await generateUniqueAccessId(targetRole);
+      const accessId = await withTimeout(
+        generateUniqueAccessId(targetRole),
+        15000,
+        'generateAccessId'
+      );
       const { salt, hash } = hashStaffPassword(password);
       const nowIso = new Date().toISOString();
 
@@ -1007,9 +1056,13 @@ async function startServer() {
         updatedAt: nowIso,
       };
 
-      await adminDb.collection('staff_credentials').doc(accessId).set(record);
+      await withTimeout(
+        adminDb.collection('staff_credentials').doc(accessId).set(record),
+        15000,
+        'saveAccess'
+      );
 
-      await writeServerAuditLog({
+      void writeServerAuditLog({
         action: 'Création accès identifiant unique',
         targetType: 'staff_credential',
         targetId: accessId,
@@ -1868,9 +1921,35 @@ async function startServer() {
     });
   }
 
+  // Express JSON / route error handler so uncaught errors never drop the socket (502)
+  app.use(
+    (
+      err: unknown,
+      _req: express.Request,
+      res: express.Response,
+      _next: express.NextFunction
+    ) => {
+      console.error('Express middleware error:', err);
+      if (!res.headersSent) {
+        res.status(500).json({ error: 'Erreur interne du serveur.' });
+      }
+    }
+  );
+
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`FBC Print server listening on http://localhost:${PORT}`);
   });
 }
 
-startServer();
+process.on('unhandledRejection', (reason) => {
+  console.error('Unhandled Promise Rejection:', reason);
+});
+
+process.on('uncaughtException', (err) => {
+  console.error('Uncaught Exception:', err);
+});
+
+startServer().catch((err) => {
+  console.error('Failed to start FBC Print server:', err);
+  process.exit(1);
+});

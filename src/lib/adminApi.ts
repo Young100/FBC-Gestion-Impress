@@ -71,35 +71,63 @@ async function adminFetch<T>(url: string, init: RequestInit = {}): Promise<T> {
     }
   }
 
-  const res = await fetch(url, {
-    ...init,
-    headers,
-    credentials: 'include',
-  });
+  const method = (init.method || 'GET').toUpperCase();
+  const maxAttempts = method === 'GET' ? 3 : 1;
 
-  const contentType = res.headers.get('content-type') || '';
-  if (!contentType.includes('application/json')) {
-    throw new Error(
-      res.ok
-        ? 'Réponse serveur invalide (format JSON attendu).'
-        : `Erreur serveur (${res.status}).`
-    );
-  }
-
-  let data: (T & { error?: string }) | null = null;
-  try {
-    data = (await res.json()) as T & { error?: string };
-  } catch {
-    throw new Error(`Réponse JSON illisible (${res.status}).`);
-  }
-
-  if (!res.ok) {
-    if (res.status === 401 && staffToken) {
-      clearStaffSessionToken();
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    let res: Response;
+    try {
+      res = await fetch(url, {
+        ...init,
+        headers,
+        credentials: 'include',
+      });
+    } catch {
+      if (attempt < maxAttempts) {
+        await new Promise((r) => setTimeout(r, 1200));
+        continue;
+      }
+      throw new Error(
+        'Connexion au serveur interrompue. Vérifiez votre réseau et réessayez.'
+      );
     }
-    throw new Error(data?.error || `Erreur serveur (${res.status})`);
+
+    if ((res.status === 502 || res.status === 503 || res.status === 504) && attempt < maxAttempts) {
+      await new Promise((r) => setTimeout(r, 1200));
+      continue;
+    }
+
+    const contentType = res.headers.get('content-type') || '';
+    if (!contentType.includes('application/json')) {
+      if (res.status === 502 || res.status === 503 || res.status === 504) {
+        throw new Error(
+          `Le serveur est temporairement indisponible ou en cours de redémarrage (${res.status}). Patientez quelques secondes et réessayez.`
+        );
+      }
+      throw new Error(
+        res.ok
+          ? 'Réponse serveur invalide (format JSON attendu).'
+          : `Erreur serveur (${res.status}).`
+      );
+    }
+
+    let data: (T & { error?: string }) | null = null;
+    try {
+      data = (await res.json()) as T & { error?: string };
+    } catch {
+      throw new Error(`Réponse JSON illisible (${res.status}).`);
+    }
+
+    if (!res.ok) {
+      if (res.status === 401 && staffToken) {
+        clearStaffSessionToken();
+      }
+      throw new Error(data?.error || `Erreur serveur (${res.status})`);
+    }
+    return (data ?? {}) as T;
   }
-  return (data ?? {}) as T;
+
+  throw new Error('Impossible de joindre le serveur.');
 }
 
 export async function fetchStaffSession(): Promise<{
