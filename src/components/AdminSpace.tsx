@@ -1,18 +1,37 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { onAuthStateChanged, signInWithPopup, signOut } from 'firebase/auth';
 import {
   AlertTriangle,
+  ArrowUpRight,
   Bell,
+  Check,
   CheckCircle2,
+  ChevronDown,
+  Clock,
   CreditCard,
   Eye,
+  EyeOff,
+  KeyRound,
   LogOut,
+  Menu,
   Plus,
   Search,
   Shield,
+  Wallet,
   X,
   XCircle,
 } from 'lucide-react';
+import {
+  clearStaffSessionToken,
+  createManualOrderServer,
+  fetchAdminBootstrap,
+  fetchStaffSession,
+  loginWithStaffCredentials,
+  logoutStaffSession,
+  rejectPaymentServer,
+  savePaymentMethodServer,
+  validatePaymentServer,
+} from '../lib/adminApi';
 import {
   adminRejectPayment,
   adminSavePaymentMethod,
@@ -51,6 +70,7 @@ import {
 } from '../types/fbc';
 import { AdminOrderDetailModal } from './AdminOrderDetailModal';
 import { AdminSettingsTabs } from './AdminSettingsTabs';
+import { DashboardCharts } from './DashboardCharts';
 
 interface AdminSpaceProps {
   services: PrintService[];
@@ -77,9 +97,15 @@ export const AdminSpace: React.FC<AdminSpaceProps> = ({
   const [authReady, setAuthReady] = useState(false);
   const [staffUser, setStaffUser] = useState<AdminUser | null>(null);
   const [authError, setAuthError] = useState<string | null>(null);
+  const [dataError, setDataError] = useState<string | null>(null);
   const [signingIn, setSigningIn] = useState(false);
+  const [accessIdInput, setAccessIdInput] = useState('');
+  const [passwordInput, setPasswordInput] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
 
   const [activeTab, setActiveTab] = useState<AdminTab>('dashboard');
+  const [navMenuOpen, setNavMenuOpen] = useState(false);
+  const navMenuRef = useRef<HTMLDivElement | null>(null);
   const [orders, setOrders] = useState<Order[]>([]);
   const [payments, setPayments] = useState<Payment[]>([]);
   const [clients, setClients] = useState<ClientProfile[]>([]);
@@ -121,16 +147,38 @@ export const AdminSpace: React.FC<AdminSpaceProps> = ({
   // Payment method editor
   const [editingMethod, setEditingMethod] = useState<PaymentMethod | null>(null);
 
+  const handleSignOut = useCallback(async () => {
+    setAuthError(null);
+    setDataError(null);
+    await logoutStaffSession().catch(() => {});
+    await signOut(auth).catch(() => {});
+    setStaffUser(null);
+  }, []);
+
   useEffect(() => {
+    let mounted = true;
     const unsub = onAuthStateChanged(auth, async (user) => {
       if (!user || !user.email) {
-        setStaffUser(null);
-        setAuthReady(true);
+        try {
+          const session = await fetchStaffSession();
+          if (!mounted) return;
+          if (session.authenticated && session.user) {
+            setAuthError(null);
+            setStaffUser(session.user);
+          } else {
+            setStaffUser(null);
+          }
+        } catch {
+          if (mounted) setStaffUser(null);
+        } finally {
+          if (mounted) setAuthReady(true);
+        }
         return;
       }
 
       try {
         const resolved = await resolveStaffUser(user.uid, user.email, user.displayName);
+        if (!mounted) return;
         if (!resolved) {
           setAuthError(
             `Le compte ${user.email} n’est pas autorisé dans l’espace atelier FBC Print.`
@@ -138,30 +186,38 @@ export const AdminSpace: React.FC<AdminSpaceProps> = ({
           setStaffUser(null);
         } else {
           setAuthError(null);
-          setStaffUser(resolved);
+          setStaffUser({ ...resolved, authMethod: 'google' });
           if (resolved.role === 'admin') {
             ensureDefaultSeedData();
           }
         }
       } catch (err) {
+        if (!mounted) return;
         setAuthError(
           err instanceof Error ? err.message : 'Erreur de vérification du compte.'
         );
         setStaffUser(null);
       } finally {
-        setAuthReady(true);
+        if (mounted) setAuthReady(true);
       }
     });
-    return () => unsub();
+    return () => {
+      mounted = false;
+      unsub();
+    };
   }, []);
 
   // 30-minute inactivity auto sign-out
   useEffect(() => {
     if (!staffUser) return;
-    let timer = window.setTimeout(() => signOut(auth), 30 * 60 * 1000);
+    let timer = window.setTimeout(() => {
+      handleSignOut();
+    }, 30 * 60 * 1000);
     const reset = () => {
       window.clearTimeout(timer);
-      timer = window.setTimeout(() => signOut(auth), 30 * 60 * 1000);
+      timer = window.setTimeout(() => {
+        handleSignOut();
+      }, 30 * 60 * 1000);
     };
     window.addEventListener('pointerdown', reset);
     window.addEventListener('keydown', reset);
@@ -170,11 +226,51 @@ export const AdminSpace: React.FC<AdminSpaceProps> = ({
       window.removeEventListener('pointerdown', reset);
       window.removeEventListener('keydown', reset);
     };
-  }, [staffUser]);
+  }, [staffUser, handleSignOut]);
 
-  // Subscribe to Firestore collections when staff authenticated
+  useEffect(() => {
+    if (!navMenuOpen) return;
+    const handlePointerDown = (e: MouseEvent) => {
+      if (navMenuRef.current && !navMenuRef.current.contains(e.target as Node)) {
+        setNavMenuOpen(false);
+      }
+    };
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setNavMenuOpen(false);
+    };
+    document.addEventListener('mousedown', handlePointerDown);
+    document.addEventListener('keydown', handleKeyDown);
+    return () => {
+      document.removeEventListener('mousedown', handlePointerDown);
+      document.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [navMenuOpen]);
+
+  const refreshCredentialsData = useCallback(async () => {
+    try {
+      const data = await fetchAdminBootstrap();
+      setOrders(Array.isArray(data.orders) ? data.orders : []);
+      setPayments(Array.isArray(data.payments) ? data.payments : []);
+      setClients(Array.isArray(data.clients) ? data.clients : []);
+      setAuditLogs(Array.isArray(data.auditLogs) ? data.auditLogs : []);
+      setDataError(null);
+    } catch (err) {
+      setDataError(
+        err instanceof Error ? err.message : 'Impossible de charger les données atelier.'
+      );
+    }
+  }, []);
+
+  // Subscribe to Firestore collections (Google Auth) or poll server API (credentials Auth)
   useEffect(() => {
     if (!staffUser) return;
+
+    if (staffUser.authMethod === 'credentials') {
+      refreshCredentialsData();
+      const intervalId = window.setInterval(refreshCredentialsData, 10000);
+      return () => window.clearInterval(intervalId);
+    }
+
     const unsubs = [
       subscribeAdminOrders(setOrders),
       subscribeAdminPayments(setPayments),
@@ -184,10 +280,38 @@ export const AdminSpace: React.FC<AdminSpaceProps> = ({
       unsubs.push(subscribeAuditLogs(setAuditLogs));
     }
     return () => unsubs.forEach((u) => u());
-  }, [staffUser]);
+  }, [staffUser, refreshCredentialsData]);
+
+  const handleCredentialSignIn = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setAuthError(null);
+    const cleanId = accessIdInput.trim().toUpperCase();
+    if (!cleanId || !passwordInput) {
+      setAuthError('Saisissez votre identifiant unique et votre mot de passe.');
+      return;
+    }
+    setSigningIn(true);
+    try {
+      if (auth.currentUser) {
+        await signOut(auth).catch(() => {});
+      }
+      const user = await loginWithStaffCredentials(cleanId, passwordInput);
+      setPasswordInput('');
+      setAuthError(null);
+      setDataError(null);
+      setStaffUser(user);
+    } catch (err) {
+      setAuthError(
+        err instanceof Error ? err.message : 'Identifiant ou mot de passe incorrect.'
+      );
+    } finally {
+      setSigningIn(false);
+    }
+  };
 
   const handleGoogleSignIn = async () => {
     setAuthError(null);
+    clearStaffSessionToken();
     setSigningIn(true);
     try {
       await signInWithPopup(auth, googleProvider);
@@ -366,7 +490,7 @@ export const AdminSpace: React.FC<AdminSpaceProps> = ({
     const validUntil = new Date();
     validUntil.setDate(validUntil.getDate() + (settings.quoteValidityDays || 15));
 
-    await createOrderInFirestore({
+    const orderPayload = {
       customerName: manualName.trim(),
       customerPhone: phoneCheck.normalized,
       isWhatsapp: true,
@@ -381,8 +505,8 @@ export const AdminSpace: React.FC<AdminSpaceProps> = ({
         (totalAmount * (settings.depositPercent || 70)) / 100
       ),
       paidAmount: 0,
-      status: 'recue',
-      paymentStatus: 'non_paye',
+      status: 'recue' as const,
+      paymentStatus: 'non_paye' as const,
       acceptedTerms: true,
       quoteValidUntil: validUntil.toISOString(),
       internalNotes: manualNotes.trim(),
@@ -396,8 +520,8 @@ export const AdminSpace: React.FC<AdminSpaceProps> = ({
           ...(isApparel
             ? {
                 apparelType: artType,
-                apparelTech: 'dtf',
-                apparelDisposition: 'poitrine_gauche',
+                apparelTech: 'dtf' as const,
+                apparelDisposition: 'poitrine_gauche' as const,
                 apparelSizes: cleanSizes,
               }
             : {}),
@@ -408,13 +532,25 @@ export const AdminSpace: React.FC<AdminSpaceProps> = ({
       ],
       files: [],
       statusHistory: [],
-      source: 'manual_admin',
-    });
+      source: 'manual_admin' as const,
+    };
 
-    setShowManualModal(false);
-    setManualName('');
-    setManualPhone('');
-    setManualNotes('');
+    try {
+      if (staffUser?.authMethod === 'credentials') {
+        await createManualOrderServer(orderPayload);
+        await refreshCredentialsData();
+      } else {
+        await createOrderInFirestore(orderPayload);
+      }
+      setShowManualModal(false);
+      setManualName('');
+      setManualPhone('');
+      setManualNotes('');
+    } catch (err) {
+      setManualError(
+        err instanceof Error ? err.message : 'Erreur lors de la création de la commande.'
+      );
+    }
   };
 
   if (!authReady) {
@@ -436,46 +572,126 @@ export const AdminSpace: React.FC<AdminSpaceProps> = ({
   if (!staffUser) {
     return (
       <div className="fbc-pattern-bg min-h-[75vh] flex items-center justify-center p-4">
-        <div className="bg-white rounded-3xl max-w-md w-full p-8 border border-slate-200 shadow-sm text-center space-y-6">
-          <img
-            src="/assets/aistudio/logo_vertical_1804a5ee.svg"
-            alt="FBC Print"
-            className="h-28 mx-auto object-contain"
-          />
-          <div className="space-y-2">
-            <h1 className="font-display text-2xl text-[#26547C]">
-              Espace Administrateur &amp; Atelier
-            </h1>
-            <p className="text-sm text-slate-600">
-              Connectez-vous avec votre compte Google autorisé pour gérer les commandes,
-              télécharger les fichiers originaux et valider les paiements.
-            </p>
+        <div className="bg-white rounded-3xl max-w-md w-full p-6 sm:p-8 border border-slate-200 shadow-sm space-y-6">
+          <div className="text-center space-y-3">
+            <img
+              src="/assets/aistudio/logo_vertical_1804a5ee.svg"
+              alt="FBC Print"
+              className="h-24 mx-auto object-contain"
+            />
+            <div className="space-y-1">
+              <h1 className="font-display text-2xl text-[#26547C]">
+                Espace Administrateur &amp; Atelier
+              </h1>
+              <p className="text-xs sm:text-sm text-slate-600">
+                Connectez-vous avec votre identifiant unique et votre mot de passe, ou
+                avec le compte Google administrateur.
+              </p>
+            </div>
           </div>
 
           {authError && (
-            <p className="text-sm font-medium text-[#EF233C] bg-[#EF233C]/10 p-3.5 rounded-2xl">
+            <p className="text-sm font-medium text-[#EF233C] bg-[#EF233C]/10 p-3.5 rounded-2xl text-center">
               {authError}
             </p>
           )}
 
-          <button
-            type="button"
-            disabled={signingIn}
-            onClick={handleGoogleSignIn}
-            className="w-full inline-flex items-center justify-center gap-2.5 px-6 py-3.5 rounded-full bg-[#26547C] text-white font-semibold text-base hover:bg-[#1e4466] transition-colors min-h-[48px] disabled:opacity-60"
-          >
-            <Shield className="w-5 h-5" />
-            {signingIn ? 'Connexion...' : 'Se connecter avec Google'}
-          </button>
+          <form onSubmit={handleCredentialSignIn} className="space-y-3.5 text-left">
+            <div>
+              <label
+                htmlFor="staff-access-id"
+                className="block text-xs font-semibold text-[#26547C] mb-1"
+              >
+                Identifiant unique atelier
+              </label>
+              <div className="relative">
+                <KeyRound className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+                <input
+                  id="staff-access-id"
+                  type="text"
+                  autoComplete="username"
+                  value={accessIdInput}
+                  onChange={(e) => setAccessIdInput(e.target.value.toUpperCase())}
+                  placeholder="Ex : FBC-OP-7K4M9Q"
+                  className="w-full pl-10 pr-4 py-3 rounded-2xl bg-[#EDF2F4] text-sm font-mono uppercase tracking-wide text-[#26547C] focus:outline-none focus:ring-2 focus:ring-[#119DA4] min-h-[46px]"
+                />
+              </div>
+            </div>
 
-          <a
-            href={typeof window !== 'undefined' ? window.location.href : '#'}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="inline-block text-xs font-medium text-[#119DA4] hover:underline"
-          >
-            Si la fenêtre de connexion Google est bloquée, ouvrir dans un nouvel onglet
-          </a>
+            <div>
+              <label
+                htmlFor="staff-password"
+                className="block text-xs font-semibold text-[#26547C] mb-1"
+              >
+                Mot de passe personnalisé
+              </label>
+              <div className="relative">
+                <input
+                  id="staff-password"
+                  type={showPassword ? 'text' : 'password'}
+                  autoComplete="current-password"
+                  value={passwordInput}
+                  onChange={(e) => setPasswordInput(e.target.value)}
+                  placeholder="Votre mot de passe"
+                  className="w-full pl-4 pr-11 py-3 rounded-2xl bg-[#EDF2F4] text-sm text-[#26547C] focus:outline-none focus:ring-2 focus:ring-[#119DA4] min-h-[46px]"
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowPassword((v) => !v)}
+                  className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-500 hover:text-[#26547C] p-1"
+                  aria-label={
+                    showPassword
+                      ? 'Masquer le mot de passe'
+                      : 'Afficher le mot de passe'
+                  }
+                >
+                  {showPassword ? (
+                    <EyeOff className="w-4 h-4" />
+                  ) : (
+                    <Eye className="w-4 h-4" />
+                  )}
+                </button>
+              </div>
+            </div>
+
+            <button
+              type="submit"
+              disabled={signingIn}
+              className="w-full inline-flex items-center justify-center gap-2 px-6 py-3.5 rounded-full bg-[#119DA4] text-white font-semibold text-sm sm:text-base hover:bg-[#0e848a] transition-colors min-h-[48px] disabled:opacity-60"
+            >
+              <KeyRound className="w-4 h-4" />
+              {signingIn ? 'Vérification...' : 'Se connecter avec mon identifiant'}
+            </button>
+          </form>
+
+          <div className="relative flex items-center justify-center">
+            <span className="h-px bg-slate-200 w-full" />
+            <span className="bg-white px-3 text-[11px] font-semibold uppercase tracking-wider text-slate-400">
+              ou
+            </span>
+            <span className="h-px bg-slate-200 w-full" />
+          </div>
+
+          <div className="space-y-3 text-center">
+            <button
+              type="button"
+              disabled={signingIn}
+              onClick={handleGoogleSignIn}
+              className="w-full inline-flex items-center justify-center gap-2.5 px-6 py-3 rounded-full bg-[#26547C] text-white font-semibold text-sm hover:bg-[#1e4466] transition-colors min-h-[46px] disabled:opacity-60"
+            >
+              <Shield className="w-4 h-4" />
+              {signingIn ? 'Connexion...' : 'Connexion Google (Admin principal)'}
+            </button>
+
+            <a
+              href={typeof window !== 'undefined' ? window.location.href : '#'}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-block text-xs font-medium text-[#119DA4] hover:underline"
+            >
+              Si la fenêtre Google est bloquée, ouvrir dans un nouvel onglet
+            </a>
+          </div>
         </div>
       </div>
     );
@@ -581,7 +797,7 @@ export const AdminSpace: React.FC<AdminSpaceProps> = ({
 
           <button
             type="button"
-            onClick={() => signOut(auth)}
+            onClick={handleSignOut}
             className="inline-flex items-center gap-2 px-4 py-2.5 rounded-full border border-slate-200 text-slate-700 text-xs font-semibold hover:text-[#EF233C] min-h-[44px]"
           >
             <LogOut className="w-4 h-4" />
@@ -590,94 +806,240 @@ export const AdminSpace: React.FC<AdminSpaceProps> = ({
         </div>
       </div>
 
-      {/* Navigation Tabs */}
-      <div className="flex items-center gap-2 overflow-x-auto no-scrollbar pb-1">
-        {tabs.map((tab) => {
-          const active = activeTab === tab.id;
-          return (
-            <button
-              key={tab.id}
-              type="button"
-              onClick={() => setActiveTab(tab.id)}
-              className={`px-5 py-2.5 rounded-full text-sm font-semibold whitespace-nowrap shrink-0 min-h-[44px] transition-colors ${
-                active
-                  ? 'bg-[#26547C] text-white'
-                  : 'bg-white text-[#26547C] border border-slate-200 hover:border-[#119DA4]'
-              }`}
-            >
-              {tab.label}
-            </button>
-          );
-        })}
+      {dataError && (
+        <div className="bg-[#EF233C]/10 border border-[#EF233C]/25 text-[#EF233C] text-xs font-medium px-4 py-3 rounded-2xl">
+          {dataError}
+        </div>
+      )}
+
+      {/* Navigation Tabs Dropdown */}
+      <div ref={navMenuRef} className="relative w-full sm:w-80">
+        <button
+          type="button"
+          onClick={() => setNavMenuOpen((open) => !open)}
+          aria-expanded={navMenuOpen}
+          aria-haspopup="listbox"
+          className="w-full flex items-center justify-between gap-3 px-4 py-3 rounded-2xl bg-white border border-slate-200 shadow-sm text-sm font-semibold text-[#26547C] hover:border-[#119DA4] transition-colors min-h-[48px]"
+        >
+          <span className="flex items-center gap-2.5 min-w-0">
+            <Menu className="w-4 h-4 text-[#119DA4] shrink-0" />
+            <span className="truncate">
+              {tabs.find((t) => t.id === activeTab)?.label || 'Menu atelier'}
+            </span>
+          </span>
+          <ChevronDown
+            className={`w-4 h-4 text-slate-500 shrink-0 transition-transform duration-200 ${
+              navMenuOpen ? 'rotate-180 text-[#119DA4]' : ''
+            }`}
+          />
+        </button>
+
+        {navMenuOpen && (
+          <div
+            role="listbox"
+            aria-label="Sections de l’espace atelier"
+            className="absolute left-0 right-0 mt-2 z-30 bg-white rounded-2xl border border-slate-200 shadow-lg p-1.5 space-y-1"
+          >
+            {tabs.map((tab) => {
+              const active = activeTab === tab.id;
+              return (
+                <button
+                  key={tab.id}
+                  type="button"
+                  role="option"
+                  aria-selected={active}
+                  onClick={() => {
+                    setActiveTab(tab.id);
+                    setNavMenuOpen(false);
+                  }}
+                  className={`w-full flex items-center justify-between gap-2 px-3.5 py-2.5 rounded-xl text-sm font-semibold text-left transition-colors min-h-[44px] ${
+                    active
+                      ? 'bg-[#26547C] text-white'
+                      : 'text-[#26547C] hover:bg-[#EDF2F4]'
+                  }`}
+                >
+                  <span className="truncate">{tab.label}</span>
+                  {active && <Check className="w-4 h-4 shrink-0" />}
+                </button>
+              );
+            })}
+          </div>
+        )}
       </div>
 
       {/* TAB: DASHBOARD */}
       {activeTab === 'dashboard' && (
         <div className="space-y-6">
+          {/* Modern KPI Strip */}
           <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-4">
-            <div className="bg-white rounded-3xl p-5 border border-slate-200 shadow-sm">
-              <div className="text-xs font-medium text-slate-500">Nouvelles</div>
-              <div className="text-3xl font-bold text-[#26547C] mt-1 tabular-nums">
+            <button
+              type="button"
+              onClick={() => {
+                setStatusFilter('recue');
+                setPaymentFilter('all');
+                setActiveTab('orders');
+              }}
+              className="group text-left bg-white rounded-2xl p-5 border border-slate-200 hover:border-[#26547C]/40 transition-colors space-y-2"
+            >
+              <div className="flex items-center justify-between gap-2 text-xs font-semibold text-slate-500">
+                <span>Nouvelles</span>
+                <ArrowUpRight className="w-3.5 h-3.5 text-slate-300 group-hover:text-[#26547C] transition-colors" />
+              </div>
+              <div className="text-3xl font-bold text-[#26547C] tabular-nums">
                 {metrics.newCount}
               </div>
-            </div>
-            <div className="bg-white rounded-3xl p-5 border border-slate-200 shadow-sm">
-              <div className="text-xs font-medium text-slate-500">Paiements à valider</div>
-              <div className="text-3xl font-bold text-[#EF233C] mt-1 tabular-nums">
+              <div className="text-[11px] text-slate-500">À prendre en charge</div>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => {
+                if (isAdmin) {
+                  setActiveTab('payments');
+                } else {
+                  setStatusFilter('all');
+                  setPaymentFilter('en_attente_validation');
+                  setActiveTab('orders');
+                }
+              }}
+              className="group text-left bg-white rounded-2xl p-5 border border-slate-200 hover:border-[#EF233C]/40 transition-colors space-y-2"
+            >
+              <div className="flex items-center justify-between gap-2 text-xs font-semibold text-slate-500">
+                <span>Paiements</span>
+                <ArrowUpRight className="w-3.5 h-3.5 text-slate-300 group-hover:text-[#EF233C] transition-colors" />
+              </div>
+              <div className="text-3xl font-bold text-[#EF233C] tabular-nums">
                 {metrics.pendingPaymentsCount}
               </div>
-            </div>
-            <div className="bg-white rounded-3xl p-5 border border-slate-200 shadow-sm">
-              <div className="text-xs font-medium text-slate-500">En production</div>
-              <div className="text-3xl font-bold text-[#119DA4] mt-1 tabular-nums">
+              <div className="text-[11px] text-slate-500">En attente validation</div>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => {
+                setStatusFilter('en_production');
+                setPaymentFilter('all');
+                setActiveTab('orders');
+              }}
+              className="group text-left bg-white rounded-2xl p-5 border border-slate-200 hover:border-[#119DA4]/40 transition-colors space-y-2"
+            >
+              <div className="flex items-center justify-between gap-2 text-xs font-semibold text-slate-500">
+                <span>En production</span>
+                <ArrowUpRight className="w-3.5 h-3.5 text-slate-300 group-hover:text-[#119DA4] transition-colors" />
+              </div>
+              <div className="text-3xl font-bold text-[#119DA4] tabular-nums">
                 {metrics.inProdCount}
               </div>
-            </div>
-            <div className="bg-white rounded-3xl p-5 border border-slate-200 shadow-sm">
-              <div className="text-xs font-medium text-slate-500">Prêtes à remettre</div>
-              <div className="text-3xl font-bold text-[#2E9E6B] mt-1 tabular-nums">
+              <div className="text-[11px] text-slate-500">Impression en cours</div>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => {
+                setStatusFilter('prete');
+                setPaymentFilter('all');
+                setActiveTab('orders');
+              }}
+              className="group text-left bg-white rounded-2xl p-5 border border-slate-200 hover:border-[#2E9E6B]/40 transition-colors space-y-2"
+            >
+              <div className="flex items-center justify-between gap-2 text-xs font-semibold text-slate-500">
+                <span>Prêtes</span>
+                <ArrowUpRight className="w-3.5 h-3.5 text-slate-300 group-hover:text-[#2E9E6B] transition-colors" />
+              </div>
+              <div className="text-3xl font-bold text-[#2E9E6B] tabular-nums">
                 {metrics.readyCount}
               </div>
-            </div>
-            <div className="bg-white rounded-3xl p-5 border border-slate-200 shadow-sm">
-              <div className="text-xs font-medium text-slate-500">En retard</div>
-              <div className="text-3xl font-bold text-amber-600 mt-1 tabular-nums">
+              <div className="text-[11px] text-slate-500">Retrait ou livraison</div>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => {
+                setStatusFilter('all');
+                setPaymentFilter('all');
+                setActiveTab('orders');
+              }}
+              className="col-span-2 sm:col-span-1 group text-left bg-white rounded-2xl p-5 border border-slate-200 hover:border-amber-500/40 transition-colors space-y-2"
+            >
+              <div className="flex items-center justify-between gap-2 text-xs font-semibold text-slate-500">
+                <span>En retard</span>
+                <Clock className="w-3.5 h-3.5 text-amber-500" />
+              </div>
+              <div className="text-3xl font-bold text-amber-600 tabular-nums">
                 {metrics.lateCount}
               </div>
-            </div>
+              <div className="text-[11px] text-slate-500">Échéance dépassée</div>
+            </button>
           </div>
 
           {isAdmin && (
             <div className="grid sm:grid-cols-3 gap-4">
-              <div className="bg-[#26547C] text-white rounded-3xl p-5">
-                <div className="text-xs text-white/80">Chiffre d’affaires du jour</div>
-                <div className="text-2xl font-bold mt-1 tabular-nums">
-                  {formatFcfa(metrics.revDay)}
+              <div className="bg-[#26547C] text-white rounded-2xl p-5 flex items-start justify-between gap-3">
+                <div>
+                  <div className="text-xs font-medium text-white/75">
+                    Chiffre d’affaires · Aujourd’hui
+                  </div>
+                  <div className="text-2xl font-bold mt-1.5 tabular-nums">
+                    {formatFcfa(metrics.revDay)}
+                  </div>
                 </div>
+                <Wallet className="w-5 h-5 text-[#119DA4] shrink-0" />
               </div>
-              <div className="bg-[#26547C] text-white rounded-3xl p-5">
-                <div className="text-xs text-white/80">Chiffre d’affaires (7 jours)</div>
-                <div className="text-2xl font-bold mt-1 tabular-nums">
-                  {formatFcfa(metrics.revWeek)}
+              <div className="bg-white rounded-2xl p-5 border border-slate-200 flex items-start justify-between gap-3">
+                <div>
+                  <div className="text-xs font-medium text-slate-500">
+                    Chiffre d’affaires · 7 jours
+                  </div>
+                  <div className="text-2xl font-bold text-[#26547C] mt-1.5 tabular-nums">
+                    {formatFcfa(metrics.revWeek)}
+                  </div>
                 </div>
+                <Wallet className="w-5 h-5 text-[#119DA4] shrink-0" />
               </div>
-              <div className="bg-[#26547C] text-white rounded-3xl p-5">
-                <div className="text-xs text-white/80">Chiffre d’affaires (30 jours)</div>
-                <div className="text-2xl font-bold mt-1 tabular-nums">
-                  {formatFcfa(metrics.revMonth)}
+              <div className="bg-white rounded-2xl p-5 border border-slate-200 flex items-start justify-between gap-3">
+                <div>
+                  <div className="text-xs font-medium text-slate-500">
+                    Chiffre d’affaires · 30 jours
+                  </div>
+                  <div className="text-2xl font-bold text-[#26547C] mt-1.5 tabular-nums">
+                    {formatFcfa(metrics.revMonth)}
+                  </div>
                 </div>
+                <Wallet className="w-5 h-5 text-[#2E9E6B] shrink-0" />
               </div>
             </div>
           )}
 
-          <div className="grid lg:grid-cols-12 gap-6">
+          {/* Interactive Curve Charts */}
+          <DashboardCharts orders={orders} payments={payments} isAdmin={isAdmin} />
+
+          <div className="grid lg:grid-cols-12 gap-6 items-stretch">
             {/* Production Queue */}
-            <div className="lg:col-span-7 bg-white rounded-3xl p-6 border border-slate-200 shadow-sm space-y-4">
-              <h2 className="font-display text-xl text-[#26547C]">
-                À produire aujourd’hui ({metrics.toProduceToday.length})
-              </h2>
+            <div className="lg:col-span-7 bg-white rounded-3xl p-6 border border-slate-200 space-y-4">
+              <div className="flex items-center justify-between gap-3">
+                <div>
+                  <h2 className="font-display text-xl text-[#26547C]">
+                    À produire aujourd’hui ({metrics.toProduceToday.length})
+                  </h2>
+                  <p className="text-xs text-slate-500 mt-0.5">
+                    Triées par urgence puis par date de livraison promise
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setStatusFilter('all');
+                    setPaymentFilter('all');
+                    setActiveTab('orders');
+                  }}
+                  className="text-xs font-semibold text-[#119DA4] hover:underline whitespace-nowrap shrink-0"
+                >
+                  Tout voir
+                </button>
+              </div>
+
               {metrics.toProduceToday.length === 0 ? (
-                <p className="text-sm text-slate-500 py-6">
+                <p className="text-sm text-slate-500 py-8 text-center">
                   Aucune commande en file d’attente de fabrication.
                 </p>
               ) : (
@@ -687,25 +1049,36 @@ export const AdminSpace: React.FC<AdminSpaceProps> = ({
                       key={o.orderId}
                       type="button"
                       onClick={() => setSelectedOrderId(o.orderId)}
-                      className="w-full py-3 flex items-center justify-between gap-3 text-left hover:bg-[#EDF2F4]/50 rounded-xl px-2 transition-colors"
+                      className="w-full py-3.5 flex items-center justify-between gap-3 text-left hover:bg-[#EDF2F4]/60 rounded-xl px-2.5 transition-colors"
                     >
-                      <div>
-                        <div className="flex items-center gap-2">
-                          <span className="font-bold text-sm text-[#26547C]">
+                      <div className="min-w-0">
+                        <div className="flex flex-wrap items-center gap-2 text-sm">
+                          <span className="font-bold text-[#26547C] tabular-nums">
                             {o.orderNumber}
                           </span>
+                          <span className="text-slate-300" aria-hidden="true">
+                            ·
+                          </span>
+                          <span className="font-medium text-slate-800 truncate">
+                            {o.customerName}
+                          </span>
                           {o.urgent && (
-                            <span className="text-[11px] font-bold px-2 py-0.5 rounded-full bg-[#EF233C] text-white">
-                              Urgent
-                            </span>
+                            <>
+                              <span className="text-slate-300" aria-hidden="true">
+                                ·
+                              </span>
+                              <span className="text-xs font-bold text-[#EF233C]">
+                                Urgent
+                              </span>
+                            </>
                           )}
                         </div>
-                        <div className="text-xs text-slate-600 mt-0.5">
-                          {o.customerName} · {o.items.map((i) => i.serviceName).join(', ')}
+                        <div className="text-xs text-slate-500 mt-0.5 truncate">
+                          {o.items.map((i) => i.serviceName).join(' · ')}
                         </div>
                       </div>
                       <span
-                        className={`px-3 py-1 rounded-full text-xs font-semibold shrink-0 ${ORDER_STATUS_META[o.status].bg} ${ORDER_STATUS_META[o.status].text}`}
+                        className={`text-xs font-semibold shrink-0 whitespace-nowrap ${ORDER_STATUS_META[o.status].text}`}
                       >
                         {ORDER_STATUS_META[o.status].label}
                       </span>
@@ -716,25 +1089,30 @@ export const AdminSpace: React.FC<AdminSpaceProps> = ({
             </div>
 
             {/* Alerts */}
-            <div className="lg:col-span-5 bg-white rounded-3xl p-6 border border-slate-200 shadow-sm space-y-4">
-              <h2 className="font-display text-xl text-[#26547C]">
-                Alertes contrôle atelier
-              </h2>
+            <div className="lg:col-span-5 bg-white rounded-3xl p-6 border border-slate-200 space-y-4">
+              <div>
+                <h2 className="font-display text-xl text-[#26547C]">
+                  Alertes contrôle atelier
+                </h2>
+                <p className="text-xs text-slate-500 mt-0.5">
+                  Vérifications qualité fichiers et justificatifs de paiement
+                </p>
+              </div>
               {metrics.alerts.length === 0 ? (
-                <p className="text-sm text-slate-500 py-6">
+                <p className="text-sm text-slate-500 py-8 text-center">
                   Aucune anomalie détectée (DPI, captures ou doublons).
                 </p>
               ) : (
-                <div className="space-y-2.5">
+                <div className="divide-y divide-slate-100">
                   {metrics.alerts.slice(0, 8).map((al) => (
                     <button
                       key={al.id}
                       type="button"
                       onClick={() => al.orderId && setSelectedOrderId(al.orderId)}
-                      className="w-full text-left p-3 rounded-2xl bg-[#EF233C]/10 border border-[#EF233C]/25 flex items-start gap-2.5 text-xs text-[#26547C] hover:bg-[#EF233C]/15"
+                      className="w-full text-left py-3 px-2.5 rounded-xl hover:bg-[#EF233C]/5 flex items-start gap-2.5 text-xs text-[#26547C] transition-colors"
                     >
                       <AlertTriangle className="w-4 h-4 text-[#EF233C] shrink-0 mt-0.5" />
-                      <span>{al.text}</span>
+                      <span className="leading-relaxed">{al.text}</span>
                     </button>
                   ))}
                 </div>
@@ -971,14 +1349,27 @@ export const AdminSpace: React.FC<AdminSpaceProps> = ({
                         <>
                           <button
                             type="button"
-                            onClick={() =>
-                              adminValidatePayment({
-                                payment: pay,
-                                order: linkedOrder,
-                                actorEmail: staffUser.email,
-                                actorRole: staffUser.role,
-                              })
-                            }
+                            onClick={async () => {
+                              try {
+                                if (staffUser.authMethod === 'credentials') {
+                                  await validatePaymentServer(pay.paymentId);
+                                  await refreshCredentialsData();
+                                } else {
+                                  await adminValidatePayment({
+                                    payment: pay,
+                                    order: linkedOrder,
+                                    actorEmail: staffUser.email,
+                                    actorRole: staffUser.role,
+                                  });
+                                }
+                              } catch (err) {
+                                setDataError(
+                                  err instanceof Error
+                                    ? err.message
+                                    : 'Impossible de valider ce paiement.'
+                                );
+                              }
+                            }}
                             className="inline-flex items-center gap-1.5 px-4 py-2 rounded-full bg-[#2E9E6B] text-white text-xs font-semibold hover:bg-[#248257] min-h-[40px]"
                           >
                             <CheckCircle2 className="w-4 h-4" />
@@ -1119,8 +1510,21 @@ export const AdminSpace: React.FC<AdminSpaceProps> = ({
                   <button
                     type="button"
                     onClick={async () => {
-                      await adminSavePaymentMethod(editingMethod, staffUser.email);
-                      setEditingMethod(null);
+                      try {
+                        if (staffUser.authMethod === 'credentials') {
+                          await savePaymentMethodServer(editingMethod);
+                          await refreshCredentialsData();
+                        } else {
+                          await adminSavePaymentMethod(editingMethod, staffUser.email);
+                        }
+                        setEditingMethod(null);
+                      } catch (err) {
+                        setDataError(
+                          err instanceof Error
+                            ? err.message
+                            : 'Impossible de sauvegarder cet opérateur.'
+                        );
+                      }
                     }}
                     className="px-5 py-2 rounded-full bg-[#26547C] text-white text-xs font-semibold"
                   >
@@ -1155,6 +1559,7 @@ export const AdminSpace: React.FC<AdminSpaceProps> = ({
           auditLogs={auditLogs}
           settings={settings}
           onReprintOrder={onReprintOrder}
+          onRefreshData={refreshCredentialsData}
         />
       )}
 
@@ -1165,6 +1570,7 @@ export const AdminSpace: React.FC<AdminSpaceProps> = ({
           staffUser={staffUser}
           settings={settings}
           onClose={() => setSelectedOrderId(null)}
+          onRefreshData={refreshCredentialsData}
         />
       )}
 
@@ -1313,14 +1719,30 @@ export const AdminSpace: React.FC<AdminSpaceProps> = ({
                 onClick={async () => {
                   const linked = orders.find((o) => o.orderId === rejectTarget.orderId);
                   if (linked && rejectReason.trim()) {
-                    await adminRejectPayment({
-                      payment: rejectTarget,
-                      order: linked,
-                      reason: rejectReason.trim(),
-                      actorEmail: staffUser.email,
-                      actorRole: staffUser.role,
-                    });
-                    setRejectTarget(null);
+                    try {
+                      if (staffUser.authMethod === 'credentials') {
+                        await rejectPaymentServer(
+                          rejectTarget.paymentId,
+                          rejectReason.trim()
+                        );
+                        await refreshCredentialsData();
+                      } else {
+                        await adminRejectPayment({
+                          payment: rejectTarget,
+                          order: linked,
+                          reason: rejectReason.trim(),
+                          actorEmail: staffUser.email,
+                          actorRole: staffUser.role,
+                        });
+                      }
+                      setRejectTarget(null);
+                    } catch (err) {
+                      setDataError(
+                        err instanceof Error
+                          ? err.message
+                          : 'Impossible de rejeter ce paiement.'
+                      );
+                    }
                   }
                 }}
                 className="px-5 py-2 rounded-full bg-[#EF233C] text-white text-sm font-semibold"

@@ -280,8 +280,21 @@ export interface AdminUser {
   displayName?: string;
   role: 'admin' | 'operator';
   active: boolean;
+  accessId?: string;
+  authMethod?: 'google' | 'credentials';
   lastLoginAt?: string;
   createdAt: unknown;
+}
+
+export interface StaffCredentialPublic {
+  accessId: string;
+  displayName: string;
+  role: 'admin' | 'operator';
+  active: boolean;
+  createdBy: string;
+  lastLoginAt?: string;
+  createdAt?: string;
+  updatedAt?: string;
 }
 
 export interface AdminInvite {

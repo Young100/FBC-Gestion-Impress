@@ -1,31 +1,50 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
+  Calendar,
+  Check,
+  ChevronLeft,
+  ChevronRight,
+  Copy,
   Download,
+  Eye,
+  EyeOff,
   Image as ImageIcon,
+  KeyRound,
   Loader2,
   Plus,
   RefreshCw,
   RotateCcw,
   Save,
+  Search,
+  ShieldCheck,
   Trash2,
   UploadCloud,
   UserPlus,
 } from 'lucide-react';
 import { getServiceImageSrc, SERVICE_IMAGE_OPTIONS } from '../data/defaults';
 import {
-  adminCreateInvite,
+  createStaffAccess,
+  deleteServiceServer,
+  deleteStaffAccess,
+  fetchServerAuditLogsByRange,
+  listStaffAccess,
+  saveClientNotesServer,
+  saveServiceServer,
+  saveShopSettingsServer,
+  updateGoogleStaffStatus,
+  updateStaffAccess,
+} from '../lib/adminApi';
+import {
   adminDeleteService,
-  adminListStaff,
   adminSaveClientNotes,
   adminSaveService,
   adminSaveShopSettings,
-  adminUpdateStaffStatus,
+  fetchAuditLogsByRange,
 } from '../lib/firestoreApi';
 import { formatFcfa, isApparelSlug } from '../lib/pricing';
 import { startResumableUpload } from '../lib/uploadClient';
 import {
   ORDER_STATUS_META,
-  type AdminInvite,
   type AdminUser,
   type AuditLog,
   type ClientProfile,
@@ -35,6 +54,7 @@ import {
   type PrintService,
   type ServiceSlug,
   type ShopSettings,
+  type StaffCredentialPublic,
 } from '../types/fbc';
 
 interface AdminSettingsTabsProps {
@@ -47,6 +67,7 @@ interface AdminSettingsTabsProps {
   auditLogs: AuditLog[];
   settings: ShopSettings;
   onReprintOrder: (order: Order) => void;
+  onRefreshData?: () => Promise<void> | void;
 }
 
 export const AdminSettingsTabs: React.FC<AdminSettingsTabsProps> = ({
@@ -59,8 +80,15 @@ export const AdminSettingsTabs: React.FC<AdminSettingsTabsProps> = ({
   auditLogs,
   settings,
   onReprintOrder,
+  onRefreshData,
 }) => {
   const isAdmin = staffUser.role === 'admin';
+  const useServerApi = staffUser.authMethod === 'credentials';
+  const safeServices = useMemo(() => (Array.isArray(services) ? services : []), [services]);
+  const safeOrders = useMemo(() => (Array.isArray(orders) ? orders : []), [orders]);
+  const safePayments = useMemo(() => (Array.isArray(payments) ? payments : []), [payments]);
+  const safeClients = useMemo(() => (Array.isArray(clients) ? clients : []), [clients]);
+  const safeAuditLogs = useMemo(() => (Array.isArray(auditLogs) ? auditLogs : []), [auditLogs]);
 
   // --- Services state ---
   const [editingService, setEditingService] = useState<PrintService | null>(null);
@@ -124,29 +152,227 @@ export const AdminSettingsTabs: React.FC<AdminSettingsTabsProps> = ({
   const [clientSearch, setClientSearch] = useState('');
   const [noteDrafts, setNoteDrafts] = useState<Record<string, string>>({});
 
-  // --- Settings & Staff state ---
+  // --- Settings & Server-Side Staff Access state ---
   const [settingsDraft, setSettingsDraft] = useState<ShopSettings>(settings);
   const [settingsSaved, setSettingsSaved] = useState(false);
-  const [staffList, setStaffList] = useState<AdminUser[]>([]);
-  const [invitesList, setInvitesList] = useState<AdminInvite[]>([]);
-  const [inviteEmail, setInviteEmail] = useState('');
-  const [inviteName, setInviteName] = useState('');
-  const [inviteRole, setInviteRole] = useState<'operator' | 'admin'>('operator');
+  const [settingsError, setSettingsError] = useState<string | null>(null);
+  const [staffCredentials, setStaffCredentials] = useState<StaffCredentialPublic[]>([]);
+  const [googleStaffList, setGoogleStaffList] = useState<AdminUser[]>([]);
+  const [staffLoading, setStaffLoading] = useState(false);
+  const [staffError, setStaffError] = useState<string | null>(null);
+  const [newAccessName, setNewAccessName] = useState('');
+  const [newAccessRole, setNewAccessRole] = useState<'operator' | 'admin'>('operator');
+  const [newAccessPassword, setNewAccessPassword] = useState('');
+  const [showNewAccessPassword, setShowNewAccessPassword] = useState(false);
+  const [creatingAccess, setCreatingAccess] = useState(false);
+  const [createdCredentialNotice, setCreatedCredentialNotice] =
+    useState<StaffCredentialPublic | null>(null);
+  const [copiedAccessId, setCopiedAccessId] = useState<string | null>(null);
+  const [resetTargetId, setResetTargetId] = useState<string | null>(null);
+  const [resetPasswordDraft, setResetPasswordDraft] = useState('');
+  const [showResetPassword, setShowResetPassword] = useState(false);
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+
+  // --- Audit log daily/monthly explorer state ---
+  const formatLocalDay = (d: Date) => {
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, '0');
+    const day = String(d.getDate()).padStart(2, '0');
+    return `${y}-${m}-${day}`;
+  };
+  const formatLocalMonth = (d: Date) => {
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, '0');
+    return `${y}-${m}`;
+  };
+  const todayDayStr = formatLocalDay(new Date());
+  const currentMonthStr = formatLocalMonth(new Date());
+
+  const [auditViewMode, setAuditViewMode] = useState<'day' | 'month'>('day');
+  const [auditSelectedDay, setAuditSelectedDay] = useState<string>(todayDayStr);
+  const [auditSelectedMonth, setAuditSelectedMonth] = useState<string>(currentMonthStr);
+  const [auditSearch, setAuditSearch] = useState('');
+  const [archivedAuditLogs, setArchivedAuditLogs] = useState<AuditLog[]>([]);
+  const [auditLoading, setAuditLoading] = useState(false);
+  const [auditError, setAuditError] = useState<string | null>(null);
+  const [auditReloadTick, setAuditReloadTick] = useState(0);
+
+  const parseAuditCreatedAt = (val: unknown): Date | null => {
+    if (!val) return null;
+    if (val instanceof Date) return Number.isNaN(val.getTime()) ? null : val;
+    if (typeof val === 'string') {
+      const parsed = new Date(val);
+      return Number.isNaN(parsed.getTime()) ? null : parsed;
+    }
+    if (typeof val === 'object') {
+      const maybeTs = val as { toDate?: () => Date; seconds?: number };
+      if (typeof maybeTs.toDate === 'function') {
+        const d = maybeTs.toDate();
+        return Number.isNaN(d.getTime()) ? null : d;
+      }
+      if (typeof maybeTs.seconds === 'number') {
+        return new Date(maybeTs.seconds * 1000);
+      }
+    }
+    return null;
+  };
+
+  const shiftAuditDay = (dayStr: string, deltaDays: number): string => {
+    const [y, m, d] = dayStr.split('-').map(Number);
+    if (!y || !m || !d) return todayDayStr;
+    return formatLocalDay(new Date(y, m - 1, d + deltaDays));
+  };
+
+  const shiftAuditMonth = (monthStr: string, deltaMonths: number): string => {
+    const [y, m] = monthStr.split('-').map(Number);
+    if (!y || !m) return currentMonthStr;
+    return formatLocalMonth(new Date(y, m - 1 + deltaMonths, 1));
+  };
 
   useEffect(() => {
     setSettingsDraft(settings);
   }, [settings]);
 
+  const safeStaffCredentials = Array.isArray(staffCredentials) ? staffCredentials : [];
+  const safeGoogleStaffList = Array.isArray(googleStaffList) ? googleStaffList : [];
+  const safeArchivedAuditLogs = Array.isArray(archivedAuditLogs) ? archivedAuditLogs : [];
+
+  const loadStaffAccess = useCallback(async () => {
+    setStaffLoading(true);
+    setStaffError(null);
+    try {
+      const res = await listStaffAccess();
+      setStaffCredentials(Array.isArray(res?.credentials) ? res.credentials : []);
+      setGoogleStaffList(Array.isArray(res?.googleUsers) ? res.googleUsers : []);
+    } catch (err) {
+      setStaffError(
+        err instanceof Error
+          ? err.message
+          : 'Impossible de charger la liste des accès collaborateurs.'
+      );
+    } finally {
+      setStaffLoading(false);
+    }
+  }, []);
+
   useEffect(() => {
     if (activeTab === 'settings' && isAdmin) {
-      adminListStaff()
-        .then((res) => {
-          setStaffList(res.users);
-          setInvitesList(res.invites);
-        })
-        .catch(() => {});
+      loadStaffAccess();
     }
-  }, [activeTab, isAdmin]);
+  }, [activeTab, isAdmin, loadStaffAccess]);
+
+  const copyAccessId = async (accessId: string) => {
+    try {
+      await navigator.clipboard.writeText(accessId);
+      setCopiedAccessId(accessId);
+      setTimeout(() => setCopiedAccessId(null), 2000);
+    } catch {
+      // Clipboard blocked in some contexts
+    }
+  };
+
+  // Fetch historical audit logs whenever viewing a previous day or a full month
+  useEffect(() => {
+    if (activeTab !== 'settings' || !isAdmin) return;
+    if (auditViewMode === 'day' && auditSelectedDay === todayDayStr && auditReloadTick === 0) {
+      setAuditError(null);
+      setAuditLoading(false);
+      return;
+    }
+
+    let cancelled = false;
+    setAuditLoading(true);
+    setAuditError(null);
+
+    let start: Date;
+    let end: Date;
+    let limitCount = 500;
+
+    if (auditViewMode === 'day') {
+      const [y, m, d] = auditSelectedDay.split('-').map(Number);
+      start = new Date(y, m - 1, d, 0, 0, 0, 0);
+      end = new Date(y, m - 1, d, 23, 59, 59, 999);
+    } else {
+      const [y, m] = auditSelectedMonth.split('-').map(Number);
+      start = new Date(y, m - 1, 1, 0, 0, 0, 0);
+      end = new Date(y, m, 0, 23, 59, 59, 999);
+      limitCount = 1000;
+    }
+
+    const fetcher = useServerApi
+      ? fetchServerAuditLogsByRange(start, end, limitCount)
+      : fetchAuditLogsByRange(start, end, limitCount);
+
+    fetcher
+      .then((logs) => {
+        if (!cancelled) {
+          setArchivedAuditLogs(Array.isArray(logs) ? logs : []);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setAuditError('Impossible de charger les journaux pour cette période.');
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setAuditLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    activeTab,
+    isAdmin,
+    useServerApi,
+    auditViewMode,
+    auditSelectedDay,
+    auditSelectedMonth,
+    todayDayStr,
+    auditReloadTick,
+  ]);
+
+  const displayedAuditLogs = useMemo(() => {
+    const isLiveToday =
+      auditViewMode === 'day' && auditSelectedDay === todayDayStr && auditReloadTick === 0;
+    const source = isLiveToday
+      ? safeAuditLogs.filter((log) => {
+          const dt = parseAuditCreatedAt(log.createdAt);
+          if (!dt) return true; // optimistic serverTimestamp pending
+          return formatLocalDay(dt) === todayDayStr;
+        })
+      : safeArchivedAuditLogs;
+
+    const q = auditSearch.trim().toLowerCase();
+    if (!q) return source;
+    return source.filter((log) =>
+      [log.action, log.targetId, log.targetType, log.actorEmail, log.details || '']
+        .join(' ')
+        .toLowerCase()
+        .includes(q)
+    );
+  }, [
+    auditViewMode,
+    auditSelectedDay,
+    todayDayStr,
+    auditReloadTick,
+    safeAuditLogs,
+    safeArchivedAuditLogs,
+    auditSearch,
+  ]);
+
+  const monthlyGroupedAuditLogs = useMemo(() => {
+    if (auditViewMode !== 'month') return [];
+    const groups = new Map<string, AuditLog[]>();
+    for (const log of displayedAuditLogs) {
+      const dt = parseAuditCreatedAt(log.createdAt) || new Date();
+      const dayKey = formatLocalDay(dt);
+      const list = groups.get(dayKey) || [];
+      list.push(log);
+      groups.set(dayKey, list);
+    }
+    return Array.from(groups.entries()).sort((a, b) => b[0].localeCompare(a[0]));
+  }, [auditViewMode, displayedAuditLogs]);
 
   // Stats computation
   const stats = useMemo(() => {
@@ -156,18 +382,19 @@ export const AdminSettingsTabs: React.FC<AdminSettingsTabsProps> = ({
     let totalTurnaroundHours = 0;
     let deliveredCount = 0;
 
-    for (const o of orders) {
+    for (const o of safeOrders) {
       byStatus[o.status] = (byStatus[o.status] || 0) + 1;
-      for (const it of o.items) {
+      for (const it of Array.isArray(o.items) ? o.items : []) {
         if (!byService[it.serviceName]) {
           byService[it.serviceName] = { count: 0, revenue: 0 };
         }
         byService[it.serviceName].count += 1;
         byService[it.serviceName].revenue += it.subtotal;
       }
-      if (o.status === 'livree' && o.statusHistory.length >= 2) {
-        const first = new Date(o.statusHistory[0].timestamp).getTime();
-        const last = new Date(o.statusHistory[o.statusHistory.length - 1].timestamp).getTime();
+      const history = Array.isArray(o.statusHistory) ? o.statusHistory : [];
+      if (o.status === 'livree' && history.length >= 2) {
+        const first = new Date(history[0].timestamp).getTime();
+        const last = new Date(history[history.length - 1].timestamp).getTime();
         if (!Number.isNaN(first) && !Number.isNaN(last) && last > first) {
           totalTurnaroundHours += (last - first) / (1000 * 60 * 60);
           deliveredCount += 1;
@@ -175,7 +402,7 @@ export const AdminSettingsTabs: React.FC<AdminSettingsTabsProps> = ({
       }
     }
 
-    for (const p of payments) {
+    for (const p of safePayments) {
       if (p.status === 'valide') {
         byOperator[p.methodName] = (byOperator[p.methodName] || 0) + p.declaredAmount;
       }
@@ -183,7 +410,7 @@ export const AdminSettingsTabs: React.FC<AdminSettingsTabsProps> = ({
 
     const avgHours = deliveredCount > 0 ? Math.round(totalTurnaroundHours / deliveredCount) : 0;
     return { byStatus, byService, byOperator, avgHours };
-  }, [orders, payments]);
+  }, [safeOrders, safePayments]);
 
   const exportCsv = (type: 'orders' | 'payments') => {
     const bom = '\uFEFF';
@@ -191,16 +418,16 @@ export const AdminSettingsTabs: React.FC<AdminSettingsTabsProps> = ({
     if (type === 'orders') {
       csv =
         'Numero;Client;Telephone;Statut;StatutPaiement;TotalFCFA;PayeFCFA;Urgent;Prestations\n' +
-        orders
+        safeOrders
           .map(
             (o) =>
-              `"${o.orderNumber}";"${o.customerName}";"${o.customerPhone}";"${ORDER_STATUS_META[o.status].label}";"${o.paymentStatus}";${o.totalAmount};${o.paidAmount || 0};${o.urgent ? 'Oui' : 'Non'};"${o.items.map((i) => i.serviceName).join(', ')}"`
+              `"${o.orderNumber}";"${o.customerName}";"${o.customerPhone}";"${ORDER_STATUS_META[o.status].label}";"${o.paymentStatus}";${o.totalAmount};${o.paidAmount || 0};${o.urgent ? 'Oui' : 'Non'};"${(Array.isArray(o.items) ? o.items : []).map((i) => i.serviceName).join(', ')}"`
           )
           .join('\n');
     } else {
       csv =
         'ID;Commande;Client;Operateur;TelephoneDepot;Reference;MontantFCFA;Statut;Validateur\n' +
-        payments
+        safePayments
           .map(
             (p) =>
               `"${p.paymentId}";"${p.orderNumber}";"${p.customerName}";"${p.methodName}";"${p.depositPhone}";"${p.transactionRef || ''}";${p.declaredAmount};"${p.status}";"${p.validatedByEmail || ''}"`
@@ -226,7 +453,7 @@ export const AdminSettingsTabs: React.FC<AdminSettingsTabsProps> = ({
           </h2>
 
           <div className="divide-y divide-slate-100">
-            {services.map((srv) => (
+            {safeServices.map((srv) => (
               <div
                 key={srv.id}
                 className="py-4 flex flex-col sm:flex-row sm:items-center justify-between gap-4"
@@ -269,19 +496,29 @@ export const AdminSettingsTabs: React.FC<AdminSettingsTabsProps> = ({
                   </button>
                   <button
                     type="button"
-                    onClick={() =>
-                      adminSaveService(
-                        { ...srv, active: !srv.active },
-                        staffUser.email
-                      )
-                    }
+                    onClick={async () => {
+                      const updated = { ...srv, active: !srv.active };
+                      if (useServerApi) {
+                        await saveServiceServer(updated);
+                        await onRefreshData?.();
+                      } else {
+                        await adminSaveService(updated, staffUser.email);
+                      }
+                    }}
                     className="px-4 py-2 rounded-full border border-slate-200 text-xs font-semibold min-h-[40px]"
                   >
                     {srv.active ? 'Désactiver' : 'Activer'}
                   </button>
                   <button
                     type="button"
-                    onClick={() => adminDeleteService(srv.id, staffUser.email)}
+                    onClick={async () => {
+                      if (useServerApi) {
+                        await deleteServiceServer(srv.id);
+                        await onRefreshData?.();
+                      } else {
+                        await adminDeleteService(srv.id, staffUser.email);
+                      }
+                    }}
                     className="p-2 text-slate-400 hover:text-[#EF233C]"
                     aria-label="Supprimer prestation"
                   >
@@ -558,7 +795,12 @@ export const AdminSettingsTabs: React.FC<AdminSettingsTabsProps> = ({
                     ...editingService,
                     imageUrl: trimmedUrl,
                   };
-                  await adminSaveService(payload, staffUser.email);
+                  if (useServerApi) {
+                    await saveServiceServer(payload);
+                    await onRefreshData?.();
+                  } else {
+                    await adminSaveService(payload, staffUser.email);
+                  }
                   setEditingService(null);
                 }}
                 className="px-6 py-2.5 rounded-full bg-[#26547C] text-white text-sm font-semibold min-h-[44px] disabled:opacity-50"
@@ -647,23 +889,26 @@ export const AdminSettingsTabs: React.FC<AdminSettingsTabsProps> = ({
                       apparelPlacementPrice: 1000,
                     }
                   : {};
-                await adminSaveService(
-                  {
-                    id: `srv_${Date.now()}`,
-                    slug: newServiceSlug,
-                    name: newServiceName.trim(),
-                    description: 'Prestation sur mesure FBC Print.',
-                    imageKey: newServiceImageKey,
-                    imageUrl: newServiceImageUrl.trim(),
-                    pricingMode: modeMap[newServiceSlug],
-                    basePrice: newServicePrice,
-                    recommendedDpi: 300,
-                    active: true,
-                    sortOrder: services.length + 1,
-                    config: defaultConfig,
-                  },
-                  staffUser.email
-                );
+                const newSrv: PrintService = {
+                  id: `srv_${Date.now()}`,
+                  slug: newServiceSlug,
+                  name: newServiceName.trim(),
+                  description: 'Prestation sur mesure FBC Print.',
+                  imageKey: newServiceImageKey,
+                  imageUrl: newServiceImageUrl.trim(),
+                  pricingMode: modeMap[newServiceSlug],
+                  basePrice: newServicePrice,
+                  recommendedDpi: 300,
+                  active: true,
+                  sortOrder: safeServices.length + 1,
+                  config: defaultConfig,
+                };
+                if (useServerApi) {
+                  await saveServiceServer(newSrv);
+                  await onRefreshData?.();
+                } else {
+                  await adminSaveService(newSrv, staffUser.email);
+                }
                 setNewServiceName('');
                 setNewServiceImageUrl('');
                 setNewServiceImageKey('hero');
@@ -766,16 +1011,16 @@ export const AdminSettingsTabs: React.FC<AdminSettingsTabsProps> = ({
   }
 
   if (activeTab === 'clients') {
-    const filteredClients = clients.filter(
+    const filteredClients = safeClients.filter(
       (c) =>
-        c.name.toLowerCase().includes(clientSearch.toLowerCase()) ||
-        c.phone.includes(clientSearch)
+        (c.name || '').toLowerCase().includes(clientSearch.toLowerCase()) ||
+        (c.phone || '').includes(clientSearch)
     );
     return (
       <div className="bg-white rounded-3xl p-6 border border-slate-200 shadow-sm space-y-5">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
           <h2 className="font-display text-xl text-[#26547C]">
-            Répertoire clients ({clients.length})
+            Répertoire clients ({safeClients.length})
           </h2>
           <input
             type="search"
@@ -794,10 +1039,10 @@ export const AdminSettingsTabs: React.FC<AdminSettingsTabsProps> = ({
         ) : (
           <div className="divide-y divide-slate-100">
             {filteredClients.map((client) => {
-              const lastOrder = orders.find(
+              const lastOrder = safeOrders.find(
                 (o) =>
-                  o.customerPhone.replace(/\D/g, '') ===
-                  client.phone.replace(/\D/g, '')
+                  (o.customerPhone || '').replace(/\D/g, '') ===
+                  (client.phone || '').replace(/\D/g, '')
               );
               return (
                 <div key={client.clientId} className="py-4 space-y-3">
@@ -832,12 +1077,15 @@ export const AdminSettingsTabs: React.FC<AdminSettingsTabsProps> = ({
                     />
                     <button
                       type="button"
-                      onClick={() =>
-                        adminSaveClientNotes(
-                          client.clientId,
-                          noteDrafts[client.clientId] ?? client.notes ?? ''
-                        )
-                      }
+                      onClick={async () => {
+                        const notes = noteDrafts[client.clientId] ?? client.notes ?? '';
+                        if (useServerApi) {
+                          await saveClientNotesServer(client.clientId, notes);
+                          await onRefreshData?.();
+                        } else {
+                          await adminSaveClientNotes(client.clientId, notes);
+                        }
+                      }}
                       className="px-4 py-2 rounded-xl bg-[#26547C] text-white text-xs font-semibold"
                     >
                       Enregistrer note
@@ -1097,13 +1345,27 @@ export const AdminSettingsTabs: React.FC<AdminSettingsTabsProps> = ({
             />
           </div>
 
-          <div className="flex items-center gap-3">
+          <div className="flex flex-wrap items-center gap-3">
             <button
               type="button"
               onClick={async () => {
-                await adminSaveShopSettings(settingsDraft, staffUser.email);
-                setSettingsSaved(true);
-                setTimeout(() => setSettingsSaved(false), 2000);
+                setSettingsError(null);
+                try {
+                  if (useServerApi) {
+                    await saveShopSettingsServer(settingsDraft);
+                    await onRefreshData?.();
+                  } else {
+                    await adminSaveShopSettings(settingsDraft, staffUser.email);
+                  }
+                  setSettingsSaved(true);
+                  setTimeout(() => setSettingsSaved(false), 2000);
+                } catch (err) {
+                  setSettingsError(
+                    err instanceof Error
+                      ? err.message
+                      : 'Impossible d’enregistrer les réglages.'
+                  );
+                }
               }}
               className="inline-flex items-center gap-2 px-6 py-3 rounded-full bg-[#26547C] text-white text-sm font-semibold min-h-[44px]"
             >
@@ -1115,136 +1377,814 @@ export const AdminSettingsTabs: React.FC<AdminSettingsTabsProps> = ({
                 Réglages sauvegardés !
               </span>
             )}
+            {settingsError && (
+              <span className="text-xs font-medium text-[#EF233C]">{settingsError}</span>
+            )}
           </div>
         </div>
 
-        {/* Team & Roles */}
-        <div className="bg-white rounded-3xl p-6 border border-slate-200 shadow-sm space-y-4">
-          <h3 className="font-bold text-lg text-[#26547C]">
-            Équipe d’atelier et accès (Rôles)
-          </h3>
-
-          <div className="grid sm:grid-cols-4 gap-3 items-end">
+        {/* Team & Roles (Server-Generated Unique ID + Server-Hashed Custom Password) */}
+        <div className="bg-white rounded-3xl p-5 sm:p-6 border border-slate-200 shadow-sm space-y-5">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
             <div>
-              <label className="block text-xs text-slate-600 mb-1">E-mail Google</label>
-              <input
-                type="email"
-                value={inviteEmail}
-                onChange={(e) => setInviteEmail(e.target.value)}
-                placeholder="operateur@gmail.com"
-                className="w-full px-3.5 py-2.5 rounded-xl bg-[#EDF2F4] text-sm min-h-[44px]"
-              />
+              <h3 className="font-bold text-lg text-[#26547C] flex items-center gap-2">
+                <KeyRound className="w-5 h-5 text-[#119DA4]" />
+                Équipe d’atelier et accès (Rôles)
+              </h3>
+              <p className="text-xs text-slate-500 mt-0.5">
+                L’identifiant unique est généré automatiquement côté serveur. Le mot de
+                passe personnalisé est haché, stocké et vérifié uniquement sur le serveur
+                à la connexion (aucun e-mail requis).
+              </p>
             </div>
+            <button
+              type="button"
+              onClick={loadStaffAccess}
+              disabled={staffLoading}
+              className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-[#EDF2F4] text-[#26547C] text-xs font-semibold hover:border-[#119DA4] self-start sm:self-auto"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${staffLoading ? 'animate-spin' : ''}`} />
+              Actualiser
+            </button>
+          </div>
+
+          <form
+            onSubmit={async (e) => {
+              e.preventDefault();
+              setStaffError(null);
+              if (newAccessName.trim().length < 2) {
+                setStaffError('Saisissez le nom complet du collaborateur (min. 2 caractères).');
+                return;
+              }
+              if (newAccessPassword.trim().length < 6) {
+                setStaffError('Définissez un mot de passe personnalisé d’au moins 6 caractères.');
+                return;
+              }
+              setCreatingAccess(true);
+              try {
+                const created = await createStaffAccess({
+                  displayName: newAccessName.trim(),
+                  role: newAccessRole,
+                  password: newAccessPassword,
+                });
+                setCreatedCredentialNotice(created);
+                setNewAccessName('');
+                setNewAccessPassword('');
+                await loadStaffAccess();
+              } catch (err) {
+                setStaffError(
+                  err instanceof Error ? err.message : 'Impossible de générer cet accès.'
+                );
+              } finally {
+                setCreatingAccess(false);
+              }
+            }}
+            className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 items-end"
+          >
             <div>
-              <label className="block text-xs text-slate-600 mb-1">Nom</label>
+              <label className="block text-xs font-semibold text-slate-600 mb-1">
+                Nom du collaborateur
+              </label>
               <input
                 type="text"
-                value={inviteName}
-                onChange={(e) => setInviteName(e.target.value)}
-                placeholder="Prénom Nom"
+                value={newAccessName}
+                onChange={(e) => setNewAccessName(e.target.value)}
+                placeholder="Ex : Moussa Ouédraogo"
+                maxLength={120}
                 className="w-full px-3.5 py-2.5 rounded-xl bg-[#EDF2F4] text-sm min-h-[44px]"
               />
             </div>
+
             <div>
-              <label className="block text-xs text-slate-600 mb-1">Rôle</label>
+              <label className="block text-xs font-semibold text-slate-600 mb-1">
+                Rôle attribué
+              </label>
               <select
-                value={inviteRole}
-                onChange={(e) => setInviteRole(e.target.value as 'operator' | 'admin')}
+                value={newAccessRole}
+                onChange={(e) => setNewAccessRole(e.target.value as 'operator' | 'admin')}
                 className="w-full px-3.5 py-2.5 rounded-xl bg-[#EDF2F4] text-sm min-h-[44px]"
               >
                 <option value="operator">Opérateur d’atelier</option>
                 <option value="admin">Administrateur principal</option>
               </select>
             </div>
-            <button
-              type="button"
-              onClick={async () => {
-                if (!inviteEmail.trim()) return;
-                await adminCreateInvite(
-                  {
-                    email: inviteEmail.trim().toLowerCase(),
-                    displayName: inviteName.trim(),
-                    role: inviteRole,
-                    invitedBy: staffUser.email,
-                  },
-                  staffUser.email
-                );
-                setInviteEmail('');
-                setInviteName('');
-                const refreshed = await adminListStaff();
-                setStaffList(refreshed.users);
-                setInvitesList(refreshed.invites);
-              }}
-              className="inline-flex items-center justify-center gap-2 px-5 py-2.5 rounded-full bg-[#119DA4] text-white text-sm font-semibold min-h-[44px]"
-            >
-              <UserPlus className="w-4 h-4" />
-              Inviter
-            </button>
-          </div>
 
+            <div>
+              <label className="block text-xs font-semibold text-slate-600 mb-1">
+                Mot de passe personnalisé
+              </label>
+              <div className="relative">
+                <input
+                  type={showNewAccessPassword ? 'text' : 'password'}
+                  value={newAccessPassword}
+                  onChange={(e) => setNewAccessPassword(e.target.value)}
+                  placeholder="Min. 6 caractères"
+                  maxLength={128}
+                  className="w-full pl-3.5 pr-10 py-2.5 rounded-xl bg-[#EDF2F4] text-sm min-h-[44px]"
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowNewAccessPassword((v) => !v)}
+                  className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-500 hover:text-[#26547C] p-1"
+                  aria-label={
+                    showNewAccessPassword
+                      ? 'Masquer le mot de passe'
+                      : 'Afficher le mot de passe'
+                  }
+                >
+                  {showNewAccessPassword ? (
+                    <EyeOff className="w-4 h-4" />
+                  ) : (
+                    <Eye className="w-4 h-4" />
+                  )}
+                </button>
+              </div>
+            </div>
+
+            <button
+              type="submit"
+              disabled={creatingAccess}
+              className="inline-flex items-center justify-center gap-2 px-5 py-2.5 rounded-full bg-[#119DA4] text-white text-sm font-semibold min-h-[44px] hover:bg-[#0e848a] disabled:opacity-60"
+            >
+              {creatingAccess ? (
+                <Loader2 className="w-4 h-4 animate-spin" />
+              ) : (
+                <UserPlus className="w-4 h-4" />
+              )}
+              {creatingAccess ? 'Génération...' : 'Générer l’accès'}
+            </button>
+          </form>
+
+          {staffError && (
+            <div className="flex flex-wrap items-center justify-between gap-2 text-xs font-medium text-[#EF233C] bg-[#EF233C]/10 border border-[#EF233C]/20 px-4 py-3 rounded-2xl">
+              <span>{staffError}</span>
+              <button
+                type="button"
+                onClick={loadStaffAccess}
+                className="px-3 py-1 rounded-full bg-white text-[#26547C] font-semibold border border-slate-200 hover:border-[#119DA4] shrink-0"
+              >
+                Réessayer
+              </button>
+            </div>
+          )}
+
+          {createdCredentialNotice && (
+            <div className="p-4 rounded-2xl bg-[#2E9E6B]/10 border border-[#2E9E6B]/30 space-y-2">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <span className="text-xs font-bold text-[#237A52] flex items-center gap-1.5">
+                  <ShieldCheck className="w-4 h-4" />
+                  Accès généré côté serveur pour {createdCredentialNotice.displayName}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setCreatedCredentialNotice(null)}
+                  className="text-[11px] font-semibold text-slate-500 hover:text-black"
+                >
+                  Fermer
+                </button>
+              </div>
+              <div className="flex flex-wrap items-center gap-2.5">
+                <span className="text-xs text-slate-700">Identifiant unique :</span>
+                <code className="px-3 py-1 rounded-lg bg-white border border-[#2E9E6B]/30 font-mono text-sm font-bold text-[#26547C]">
+                  {createdCredentialNotice.accessId}
+                </code>
+                <button
+                  type="button"
+                  onClick={() => copyAccessId(createdCredentialNotice.accessId)}
+                  className="inline-flex items-center gap-1 px-3 py-1 rounded-lg bg-[#26547C] text-white text-xs font-semibold"
+                >
+                  {copiedAccessId === createdCredentialNotice.accessId ? (
+                    <>
+                      <Check className="w-3.5 h-3.5" />
+                      Copié
+                    </>
+                  ) : (
+                    <>
+                      <Copy className="w-3.5 h-3.5" />
+                      Copier l’ID
+                    </>
+                  )}
+                </button>
+              </div>
+              <p className="text-[11px] text-slate-600">
+                Transmettez cet identifiant unique et le mot de passe personnalisé que vous
+                avez saisi au collaborateur. Le mot de passe est chiffré côté serveur et ne
+                pourra pas être affiché à nouveau.
+              </p>
+            </div>
+          )}
+
+          {/* List of Server-Generated Accesses */}
           <div className="divide-y divide-slate-100 text-sm">
-            {staffList.map((u) => (
-              <div key={u.uid} className="py-2.5 flex items-center justify-between gap-3">
-                <div>
-                  <span className="font-semibold text-[#26547C]">
-                    {u.displayName || u.email}
-                  </span>{' '}
-                  <span className="text-xs text-slate-500">({u.email})</span>
-                </div>
-                <div className="flex items-center gap-2">
-                  <span className="text-xs font-semibold px-2.5 py-1 rounded-full bg-[#EDF2F4] text-[#26547C]">
-                    {u.role === 'admin' ? 'Admin' : 'Opérateur'}
-                  </span>
-                  {u.email !== 'ouattaraabdoulaye479@gmail.com' && (
-                    <button
-                      type="button"
-                      onClick={async () => {
-                        await adminUpdateStaffStatus(
-                          u.uid,
-                          !u.active,
-                          u.role,
-                          staffUser.email
-                        );
-                        const refreshed = await adminListStaff();
-                        setStaffList(refreshed.users);
-                      }}
-                      className="text-xs font-semibold text-[#EF233C]"
-                    >
-                      {u.active ? 'Désactiver' : 'Réactiver'}
-                    </button>
+            {safeStaffCredentials.map((cred) => {
+              const isSelf = staffUser.accessId === cred.accessId;
+              return (
+                <div key={cred.accessId} className="py-3 space-y-2.5">
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
+                    <div className="min-w-0 space-y-1">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="font-semibold text-[#26547C]">
+                          {cred.displayName}
+                        </span>
+                        <code className="px-2 py-0.5 rounded-md bg-[#EDF2F4] font-mono text-xs font-bold text-[#26547C]">
+                          {cred.accessId}
+                        </code>
+                        <button
+                          type="button"
+                          onClick={() => copyAccessId(cred.accessId)}
+                          className="text-slate-400 hover:text-[#119DA4] p-0.5"
+                          title="Copier l’identifiant"
+                          aria-label={`Copier l’identifiant ${cred.accessId}`}
+                        >
+                          {copiedAccessId === cred.accessId ? (
+                            <Check className="w-3.5 h-3.5 text-[#2E9E6B]" />
+                          ) : (
+                            <Copy className="w-3.5 h-3.5" />
+                          )}
+                        </button>
+                        <span
+                          className={`text-[11px] font-semibold px-2.5 py-0.5 rounded-full ${
+                            cred.active
+                              ? 'bg-[#2E9E6B]/15 text-[#237A52]'
+                              : 'bg-slate-200 text-slate-600'
+                          }`}
+                        >
+                          {cred.active ? 'Actif' : 'Désactivé'}
+                        </span>
+                      </div>
+                      <div className="text-[11px] text-slate-500">
+                        Créé par {cred.createdBy}
+                        {cred.lastLoginAt
+                          ? ` · Dernière connexion : ${new Date(
+                              cred.lastLoginAt
+                            ).toLocaleString('fr-FR')}`
+                          : ' · Jamais connecté'}
+                      </div>
+                    </div>
+
+                    <div className="flex flex-wrap items-center gap-2 shrink-0">
+                      <select
+                        value={cred.role}
+                        onChange={async (e) => {
+                          const nextRole = e.target.value as 'operator' | 'admin';
+                          setStaffError(null);
+                          try {
+                            await updateStaffAccess(cred.accessId, { role: nextRole });
+                            await loadStaffAccess();
+                          } catch (err) {
+                            setStaffError(
+                              err instanceof Error
+                                ? err.message
+                                : 'Impossible de changer le rôle.'
+                            );
+                          }
+                        }}
+                        className="text-xs font-semibold px-2.5 py-1.5 rounded-xl bg-[#EDF2F4] text-[#26547C]"
+                      >
+                        <option value="operator">Opérateur</option>
+                        <option value="admin">Admin</option>
+                      </select>
+
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setResetTargetId(
+                            resetTargetId === cred.accessId ? null : cred.accessId
+                          );
+                          setResetPasswordDraft('');
+                          setShowResetPassword(false);
+                        }}
+                        className="px-3 py-1.5 rounded-xl bg-[#EDF2F4] text-[#26547C] text-xs font-semibold hover:bg-[#119DA4]/15"
+                      >
+                        Mot de passe
+                      </button>
+
+                      {!isSelf && (
+                        <>
+                          <button
+                            type="button"
+                            onClick={async () => {
+                              setStaffError(null);
+                              try {
+                                await updateStaffAccess(cred.accessId, {
+                                  active: !cred.active,
+                                });
+                                await loadStaffAccess();
+                              } catch (err) {
+                                setStaffError(
+                                  err instanceof Error
+                                    ? err.message
+                                    : 'Impossible de modifier le statut.'
+                                );
+                              }
+                            }}
+                            className={`text-xs font-semibold px-2.5 py-1.5 rounded-xl ${
+                              cred.active
+                                ? 'text-amber-700 bg-amber-50 hover:bg-amber-100'
+                                : 'text-[#237A52] bg-[#2E9E6B]/15'
+                            }`}
+                          >
+                            {cred.active ? 'Désactiver' : 'Réactiver'}
+                          </button>
+
+                          {confirmDeleteId === cred.accessId ? (
+                            <div className="inline-flex items-center gap-1.5">
+                              <button
+                                type="button"
+                                onClick={async () => {
+                                  setStaffError(null);
+                                  try {
+                                    await deleteStaffAccess(cred.accessId);
+                                    setConfirmDeleteId(null);
+                                    await loadStaffAccess();
+                                  } catch (err) {
+                                    setStaffError(
+                                      err instanceof Error
+                                        ? err.message
+                                        : 'Impossible de supprimer cet accès.'
+                                    );
+                                  }
+                                }}
+                                className="px-2.5 py-1.5 rounded-xl bg-[#EF233C] text-white text-xs font-semibold"
+                              >
+                                Confirmer
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => setConfirmDeleteId(null)}
+                                className="text-xs text-slate-500 px-1.5"
+                              >
+                                Annuler
+                              </button>
+                            </div>
+                          ) : (
+                            <button
+                              type="button"
+                              onClick={() => setConfirmDeleteId(cred.accessId)}
+                              className="p-1.5 text-slate-400 hover:text-[#EF233C]"
+                              aria-label={`Supprimer ${cred.accessId}`}
+                            >
+                              <Trash2 className="w-4 h-4" />
+                            </button>
+                          )}
+                        </>
+                      )}
+                    </div>
+                  </div>
+
+                  {resetTargetId === cred.accessId && (
+                    <div className="flex flex-wrap items-center gap-2 bg-[#EDF2F4]/70 p-3 rounded-xl">
+                      <div className="relative flex-1 min-w-[200px]">
+                        <input
+                          type={showResetPassword ? 'text' : 'password'}
+                          value={resetPasswordDraft}
+                          onChange={(e) => setResetPasswordDraft(e.target.value)}
+                          placeholder="Nouveau mot de passe personnalisé (min. 6 caractères)"
+                          className="w-full pl-3 pr-9 py-2 rounded-lg bg-white border border-slate-200 text-xs"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => setShowResetPassword((v) => !v)}
+                          className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-500"
+                        >
+                          {showResetPassword ? (
+                            <EyeOff className="w-3.5 h-3.5" />
+                          ) : (
+                            <Eye className="w-3.5 h-3.5" />
+                          )}
+                        </button>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          if (resetPasswordDraft.trim().length < 6) {
+                            setStaffError(
+                              'Le nouveau mot de passe doit contenir au moins 6 caractères.'
+                            );
+                            return;
+                          }
+                          setStaffError(null);
+                          try {
+                            await updateStaffAccess(cred.accessId, {
+                              password: resetPasswordDraft,
+                            });
+                            setResetTargetId(null);
+                            setResetPasswordDraft('');
+                            await loadStaffAccess();
+                          } catch (err) {
+                            setStaffError(
+                              err instanceof Error
+                                ? err.message
+                                : 'Impossible de mettre à jour le mot de passe.'
+                            );
+                          }
+                        }}
+                        className="px-4 py-2 rounded-lg bg-[#26547C] text-white text-xs font-semibold"
+                      >
+                        Enregistrer
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setResetTargetId(null);
+                          setResetPasswordDraft('');
+                        }}
+                        className="text-xs text-slate-500 px-2"
+                      >
+                        Annuler
+                      </button>
+                    </div>
                   )}
                 </div>
-              </div>
-            ))}
-            {invitesList.map((inv) => (
-              <div key={inv.email} className="py-2 text-xs text-slate-500 flex justify-between">
-                <span>Invitation en attente : {inv.email}</span>
-                <span>Rôle : {inv.role}</span>
-              </div>
-            ))}
-          </div>
-        </div>
+              );
+            })}
 
-        {/* Immutable Audit Log */}
-        <div className="bg-white rounded-3xl p-6 border border-slate-200 shadow-sm space-y-3">
-          <h3 className="font-bold text-lg text-[#26547C]">
-            Journal des actions sensibles
-          </h3>
-          <div className="max-h-64 overflow-y-auto divide-y divide-slate-100 text-xs">
-            {auditLogs.map((log) => (
-              <div key={log.logId} className="py-2 flex justify-between gap-3">
-                <div>
-                  <strong className="text-[#26547C]">{log.action}</strong> ·{' '}
-                  <span>{log.targetId}</span> ·{' '}
-                  <span className="text-slate-600">{log.actorEmail}</span>
-                  {log.details ? ` — ${log.details}` : ''}
-                </div>
-              </div>
-            ))}
-            {auditLogs.length === 0 && (
-              <p className="text-slate-500 py-4">Aucune action enregistrée pour le moment.</p>
+            {!staffLoading && safeStaffCredentials.length === 0 && (
+              <p className="text-xs text-slate-500 py-4 text-center">
+                Aucun accès par identifiant unique créé pour le moment. Utilisez le
+                formulaire ci-dessus pour en générer un.
+              </p>
             )}
           </div>
+
+          {/* Legacy Google Accounts (read/toggle) */}
+          {safeGoogleStaffList.length > 0 && (
+            <div className="pt-3 border-t border-slate-200 space-y-2">
+              <div className="text-xs font-semibold text-slate-500 uppercase tracking-wide">
+                Comptes Google administrateur associés
+              </div>
+              <div className="divide-y divide-slate-100 text-xs">
+                {safeGoogleStaffList.map((u) => (
+                  <div
+                    key={u.uid}
+                    className="py-2 flex items-center justify-between gap-3"
+                  >
+                    <div>
+                      <span className="font-semibold text-[#26547C]">
+                        {u.displayName || u.email}
+                      </span>{' '}
+                      <span className="text-slate-500">({u.email})</span>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <span className="font-semibold px-2.5 py-0.5 rounded-full bg-[#EDF2F4] text-[#26547C]">
+                        {u.role === 'admin' ? 'Admin' : 'Opérateur'}
+                      </span>
+                      {u.email !== 'ouattaraabdoulaye479@gmail.com' && (
+                        <button
+                          type="button"
+                          onClick={async () => {
+                            await updateGoogleStaffStatus(u.uid, !u.active, u.role);
+                            await loadStaffAccess();
+                          }}
+                          className="font-semibold text-[#EF233C]"
+                        >
+                          {u.active ? 'Désactiver' : 'Réactiver'}
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* Immutable Audit Log (Daily & Monthly Archive) */}
+        <div className="bg-white rounded-3xl p-5 sm:p-6 border border-slate-200 shadow-sm space-y-4">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div>
+              <h3 className="font-bold text-lg text-[#26547C]">
+                Journal des actions sensibles
+              </h3>
+              <p className="text-xs text-slate-500 mt-0.5">
+                Suivi journalier en direct avec historique des jours et mois précédents.
+              </p>
+            </div>
+
+            <div className="inline-flex items-center p-1 rounded-xl bg-[#EDF2F4] self-start sm:self-auto">
+              <button
+                type="button"
+                onClick={() => {
+                  setAuditViewMode('day');
+                  setAuditReloadTick(0);
+                }}
+                className={`px-3.5 py-1.5 rounded-lg text-xs font-semibold transition-colors min-h-[36px] ${
+                  auditViewMode === 'day'
+                    ? 'bg-white text-[#26547C] shadow-sm'
+                    : 'text-slate-600 hover:text-[#26547C]'
+                }`}
+              >
+                Par jour
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setAuditViewMode('month');
+                  setAuditReloadTick((n) => n + 1);
+                }}
+                className={`px-3.5 py-1.5 rounded-lg text-xs font-semibold transition-colors min-h-[36px] ${
+                  auditViewMode === 'month'
+                    ? 'bg-white text-[#26547C] shadow-sm'
+                    : 'text-slate-600 hover:text-[#26547C]'
+                }`}
+              >
+                Par mois
+              </button>
+            </div>
+          </div>
+
+          {/* Period Navigation & Search */}
+          <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3 p-3.5 rounded-2xl bg-[#EDF2F4]/70 border border-slate-200/80">
+            {auditViewMode === 'day' ? (
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setAuditSelectedDay((d) => shiftAuditDay(d, -1));
+                    setAuditReloadTick(0);
+                  }}
+                  className="inline-flex items-center gap-1 px-3 py-2 rounded-xl bg-white border border-slate-200 text-xs font-semibold text-[#26547C] hover:border-[#119DA4] min-h-[40px]"
+                >
+                  <ChevronLeft className="w-4 h-4" />
+                  Jour préc.
+                </button>
+
+                <label className="inline-flex items-center gap-2 px-3 py-1.5 rounded-xl bg-white border border-slate-200 min-h-[40px]">
+                  <Calendar className="w-4 h-4 text-[#119DA4] shrink-0" />
+                  <input
+                    type="date"
+                    value={auditSelectedDay}
+                    max={todayDayStr}
+                    onChange={(e) => {
+                      if (e.target.value) {
+                        setAuditSelectedDay(e.target.value);
+                        setAuditReloadTick(0);
+                      }
+                    }}
+                    className="text-xs font-semibold text-[#26547C] bg-transparent focus:outline-none tabular-nums"
+                  />
+                </label>
+
+                <button
+                  type="button"
+                  disabled={auditSelectedDay >= todayDayStr}
+                  onClick={() => {
+                    setAuditSelectedDay((d) => {
+                      const next = shiftAuditDay(d, 1);
+                      return next > todayDayStr ? todayDayStr : next;
+                    });
+                    setAuditReloadTick(0);
+                  }}
+                  className="inline-flex items-center gap-1 px-3 py-2 rounded-xl bg-white border border-slate-200 text-xs font-semibold text-[#26547C] hover:border-[#119DA4] disabled:opacity-45 min-h-[40px]"
+                >
+                  Jour suiv.
+                  <ChevronRight className="w-4 h-4" />
+                </button>
+
+                {auditSelectedDay !== todayDayStr && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setAuditSelectedDay(todayDayStr);
+                      setAuditReloadTick(0);
+                    }}
+                    className="px-3 py-2 rounded-xl bg-[#119DA4]/15 text-[#0E7F85] text-xs font-bold hover:bg-[#119DA4]/25 min-h-[40px]"
+                  >
+                    Aujourd’hui
+                  </button>
+                )}
+              </div>
+            ) : (
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setAuditSelectedMonth((m) => shiftAuditMonth(m, -1));
+                  }}
+                  className="inline-flex items-center gap-1 px-3 py-2 rounded-xl bg-white border border-slate-200 text-xs font-semibold text-[#26547C] hover:border-[#119DA4] min-h-[40px]"
+                >
+                  <ChevronLeft className="w-4 h-4" />
+                  Mois préc.
+                </button>
+
+                <label className="inline-flex items-center gap-2 px-3 py-1.5 rounded-xl bg-white border border-slate-200 min-h-[40px]">
+                  <Calendar className="w-4 h-4 text-[#119DA4] shrink-0" />
+                  <input
+                    type="month"
+                    value={auditSelectedMonth}
+                    max={currentMonthStr}
+                    onChange={(e) => {
+                      if (e.target.value) setAuditSelectedMonth(e.target.value);
+                    }}
+                    className="text-xs font-semibold text-[#26547C] bg-transparent focus:outline-none tabular-nums"
+                  />
+                </label>
+
+                <button
+                  type="button"
+                  disabled={auditSelectedMonth >= currentMonthStr}
+                  onClick={() => {
+                    setAuditSelectedMonth((m) => {
+                      const next = shiftAuditMonth(m, 1);
+                      return next > currentMonthStr ? currentMonthStr : next;
+                    });
+                  }}
+                  className="inline-flex items-center gap-1 px-3 py-2 rounded-xl bg-white border border-slate-200 text-xs font-semibold text-[#26547C] hover:border-[#119DA4] disabled:opacity-45 min-h-[40px]"
+                >
+                  Mois suiv.
+                  <ChevronRight className="w-4 h-4" />
+                </button>
+
+                {auditSelectedMonth !== currentMonthStr && (
+                  <button
+                    type="button"
+                    onClick={() => setAuditSelectedMonth(currentMonthStr)}
+                    className="px-3 py-2 rounded-xl bg-[#119DA4]/15 text-[#0E7F85] text-xs font-bold hover:bg-[#119DA4]/25 min-h-[40px]"
+                  >
+                    Mois en cours
+                  </button>
+                )}
+              </div>
+            )}
+
+            <div className="flex items-center gap-2 flex-1 lg:max-w-xs">
+              <div className="relative flex-1 min-w-0">
+                <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+                <input
+                  type="text"
+                  value={auditSearch}
+                  onChange={(e) => setAuditSearch(e.target.value)}
+                  placeholder="Filtrer (action, cible, auteur)..."
+                  className="w-full pl-8 pr-3 py-2 rounded-xl bg-white border border-slate-200 text-xs focus:outline-none focus:border-[#119DA4] min-h-[40px]"
+                />
+              </div>
+              <button
+                type="button"
+                onClick={() => setAuditReloadTick((n) => n + 1)}
+                title="Actualiser le journal"
+                className="p-2 rounded-xl bg-white border border-slate-200 text-[#26547C] hover:border-[#119DA4] min-h-[40px] min-w-[40px] flex items-center justify-center shrink-0"
+                aria-label="Actualiser le journal"
+              >
+                <RefreshCw className={`w-4 h-4 ${auditLoading ? 'animate-spin' : ''}`} />
+              </button>
+            </div>
+          </div>
+
+          {/* Selected Period Summary Header */}
+          <div className="flex items-center justify-between gap-2 text-xs text-slate-600 px-1">
+            <span className="font-semibold text-[#26547C] capitalize">
+              {auditViewMode === 'day'
+                ? (() => {
+                    const [y, m, d] = auditSelectedDay.split('-').map(Number);
+                    const formatted = new Date(y, m - 1, d).toLocaleDateString('fr-FR', {
+                      weekday: 'long',
+                      day: 'numeric',
+                      month: 'long',
+                      year: 'numeric',
+                    });
+                    return auditSelectedDay === todayDayStr
+                      ? `Aujourd’hui · ${formatted}`
+                      : formatted;
+                  })()
+                : (() => {
+                    const [y, m] = auditSelectedMonth.split('-').map(Number);
+                    return new Date(y, m - 1, 1).toLocaleDateString('fr-FR', {
+                      month: 'long',
+                      year: 'numeric',
+                    });
+                  })()}
+            </span>
+            <span className="tabular-nums font-medium">
+              {displayedAuditLogs.length} action{displayedAuditLogs.length > 1 ? 's' : ''}
+            </span>
+          </div>
+
+          {auditError && (
+            <p className="text-xs font-medium text-[#EF233C] bg-[#EF233C]/10 px-3.5 py-2.5 rounded-xl">
+              {auditError}
+            </p>
+          )}
+
+          {auditLoading ? (
+            <div className="py-10 flex items-center justify-center gap-2 text-xs text-slate-500">
+              <Loader2 className="w-4 h-4 animate-spin text-[#119DA4]" />
+              Chargement des journaux...
+            </div>
+          ) : auditViewMode === 'day' ? (
+            <div className="max-h-80 overflow-y-auto divide-y divide-slate-100 text-xs border border-slate-100 rounded-2xl px-3">
+              {displayedAuditLogs.map((log) => {
+                const dt = parseAuditCreatedAt(log.createdAt);
+                const timeStr = dt
+                  ? dt.toLocaleTimeString('fr-FR', {
+                      hour: '2-digit',
+                      minute: '2-digit',
+                      second: '2-digit',
+                    })
+                  : 'À l’instant';
+                return (
+                  <div
+                    key={log.logId}
+                    className="py-2.5 flex flex-col sm:flex-row sm:items-start justify-between gap-1.5 sm:gap-4"
+                  >
+                    <div className="min-w-0 flex-1 break-words">
+                      <strong className="text-[#26547C]">{log.action}</strong>
+                      <span className="text-slate-400"> · </span>
+                      <span className="font-mono text-[11px] text-slate-700">{log.targetId}</span>
+                      <span className="text-slate-400"> · </span>
+                      <span className="text-slate-600">{log.actorEmail}</span>
+                      {log.details ? (
+                        <span className="text-slate-700"> — {log.details}</span>
+                      ) : null}
+                    </div>
+                    <span className="text-[11px] text-slate-500 tabular-nums shrink-0">
+                      {timeStr}
+                    </span>
+                  </div>
+                );
+              })}
+              {displayedAuditLogs.length === 0 && (
+                <p className="text-slate-500 py-6 text-center">
+                  Aucune action sensible enregistrée pour cette journée.
+                </p>
+              )}
+            </div>
+          ) : (
+            <div className="max-h-96 overflow-y-auto space-y-3 pr-1">
+              {monthlyGroupedAuditLogs.map(([dayKey, dayLogs]) => {
+                const [y, m, d] = dayKey.split('-').map(Number);
+                const dayTitle = new Date(y, m - 1, d).toLocaleDateString('fr-FR', {
+                  weekday: 'long',
+                  day: 'numeric',
+                  month: 'long',
+                });
+                return (
+                  <div
+                    key={dayKey}
+                    className="border border-slate-200 rounded-2xl overflow-hidden"
+                  >
+                    <div className="bg-[#EDF2F4] px-3.5 py-2 flex items-center justify-between gap-2 text-xs">
+                      <span className="font-bold text-[#26547C] capitalize">{dayTitle}</span>
+                      <div className="flex items-center gap-3 shrink-0">
+                        <span className="text-slate-600 tabular-nums">
+                          {dayLogs.length} action{dayLogs.length > 1 ? 's' : ''}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setAuditSelectedDay(dayKey);
+                            setAuditViewMode('day');
+                            setAuditReloadTick(0);
+                          }}
+                          className="font-semibold text-[#119DA4] hover:underline"
+                        >
+                          Ouvrir le jour
+                        </button>
+                      </div>
+                    </div>
+                    <div className="divide-y divide-slate-100 px-3.5 text-xs bg-white">
+                      {dayLogs.map((log) => {
+                        const dt = parseAuditCreatedAt(log.createdAt);
+                        const timeStr = dt
+                          ? dt.toLocaleTimeString('fr-FR', {
+                              hour: '2-digit',
+                              minute: '2-digit',
+                              second: '2-digit',
+                            })
+                          : '--:--';
+                        return (
+                          <div
+                            key={log.logId}
+                            className="py-2 flex flex-col sm:flex-row sm:items-start justify-between gap-1 sm:gap-4"
+                          >
+                            <div className="min-w-0 flex-1 break-words">
+                              <strong className="text-[#26547C]">{log.action}</strong>
+                              <span className="text-slate-400"> · </span>
+                              <span className="font-mono text-[11px] text-slate-700">
+                                {log.targetId}
+                              </span>
+                              <span className="text-slate-400"> · </span>
+                              <span className="text-slate-600">{log.actorEmail}</span>
+                              {log.details ? (
+                                <span className="text-slate-700"> — {log.details}</span>
+                              ) : null}
+                            </div>
+                            <span className="text-[11px] text-slate-500 tabular-nums shrink-0">
+                              {timeStr}
+                            </span>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                );
+              })}
+              {monthlyGroupedAuditLogs.length === 0 && (
+                <p className="text-xs text-slate-500 py-6 text-center border border-slate-100 rounded-2xl">
+                  Aucune action sensible enregistrée pour ce mois.
+                </p>
+              )}
+            </div>
+          )}
         </div>
       </div>
     );

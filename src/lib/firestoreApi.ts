@@ -11,6 +11,7 @@ import {
   runTransaction,
   serverTimestamp,
   setDoc,
+  Timestamp,
   updateDoc,
   where,
   type Unsubscribe,
@@ -614,7 +615,7 @@ export function subscribeAdminClients(
 
 export function subscribeAuditLogs(onLogs: (logs: AuditLog[]) => void): Unsubscribe {
   return onSnapshot(
-    query(collection(db, 'audit_logs'), orderBy('createdAt', 'desc'), limit(100)),
+    query(collection(db, 'audit_logs'), orderBy('createdAt', 'desc'), limit(200)),
     (snap) => {
       onLogs(snap.docs.map((d) => d.data() as AuditLog));
     },
@@ -622,6 +623,27 @@ export function subscribeAuditLogs(onLogs: (logs: AuditLog[]) => void): Unsubscr
       handleFirestoreError(error, OperationType.LIST, 'audit_logs');
     }
   );
+}
+
+export async function fetchAuditLogsByRange(
+  startDate: Date,
+  endDate: Date,
+  maxResults = 500
+): Promise<AuditLog[]> {
+  try {
+    const q = query(
+      collection(db, 'audit_logs'),
+      where('createdAt', '>=', Timestamp.fromDate(startDate)),
+      where('createdAt', '<=', Timestamp.fromDate(endDate)),
+      orderBy('createdAt', 'desc'),
+      limit(maxResults)
+    );
+    const snap = await getDocs(q);
+    return snap.docs.map((d) => d.data() as AuditLog);
+  } catch (error) {
+    handleFirestoreError(error, OperationType.LIST, 'audit_logs');
+    throw error;
+  }
 }
 
 export async function writeAuditLog(params: {

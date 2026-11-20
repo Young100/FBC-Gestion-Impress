@@ -11,6 +11,10 @@ import {
   X,
 } from 'lucide-react';
 import {
+  updateOrderFieldsServer,
+  updateOrderStatusServer,
+} from '../lib/adminApi';
+import {
   adminUpdateOrderFields,
   adminUpdateOrderStatus,
 } from '../lib/firestoreApi';
@@ -35,6 +39,7 @@ interface AdminOrderDetailModalProps {
   staffUser: AdminUser;
   settings: ShopSettings;
   onClose: () => void;
+  onRefreshData?: () => Promise<void> | void;
 }
 
 const ALL_STATUSES: OrderStatus[] = [
@@ -54,6 +59,7 @@ export const AdminOrderDetailModal: React.FC<AdminOrderDetailModalProps> = ({
   staffUser,
   settings,
   onClose,
+  onRefreshData,
 }) => {
   const [selectedStatus, setSelectedStatus] = useState<OrderStatus>(order.status);
   const [statusNote, setStatusNote] = useState('');
@@ -64,6 +70,7 @@ export const AdminOrderDetailModal: React.FC<AdminOrderDetailModalProps> = ({
   const [isUrgent, setIsUrgent] = useState(order.urgent);
   const [discountAmount, setDiscountAmount] = useState<number>(order.discountAmount || 0);
   const [saving, setSaving] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
   const [previewFile, setPreviewFile] = useState<{
     fileId: string;
     name: string;
@@ -73,23 +80,41 @@ export const AdminOrderDetailModal: React.FC<AdminOrderDetailModalProps> = ({
   const [zipError, setZipError] = useState<string | null>(null);
 
   const isAdmin = staffUser.role === 'admin';
+  const useServerApi = staffUser.authMethod === 'credentials';
   const statusMeta = ORDER_STATUS_META[order.status];
   const paymentMeta = PAYMENT_STATUS_META[order.paymentStatus];
 
   const handleStatusSave = async () => {
     setSaving(true);
+    setActionError(null);
     try {
-      await adminUpdateOrderStatus({
-        order,
-        newStatus: selectedStatus,
-        actorEmail: staffUser.email,
-        actorRole: staffUser.role,
-        note: statusNote,
-        correctionMessage:
-          selectedStatus === 'fichier_a_corriger' ? correctionMsg : undefined,
-        cancellationReason: selectedStatus === 'annulee' ? cancelReason : undefined,
-      });
+      if (useServerApi) {
+        await updateOrderStatusServer({
+          orderId: order.orderId,
+          newStatus: selectedStatus,
+          note: statusNote,
+          correctionMessage:
+            selectedStatus === 'fichier_a_corriger' ? correctionMsg : undefined,
+          cancellationReason: selectedStatus === 'annulee' ? cancelReason : undefined,
+        });
+        await onRefreshData?.();
+      } else {
+        await adminUpdateOrderStatus({
+          order,
+          newStatus: selectedStatus,
+          actorEmail: staffUser.email,
+          actorRole: staffUser.role,
+          note: statusNote,
+          correctionMessage:
+            selectedStatus === 'fichier_a_corriger' ? correctionMsg : undefined,
+          cancellationReason: selectedStatus === 'annulee' ? cancelReason : undefined,
+        });
+      }
       setStatusNote('');
+    } catch (err) {
+      setActionError(
+        err instanceof Error ? err.message : 'Erreur lors du changement de statut.'
+      );
     } finally {
       setSaving(false);
     }
@@ -97,6 +122,7 @@ export const AdminOrderDetailModal: React.FC<AdminOrderDetailModalProps> = ({
 
   const handleMetaSave = async () => {
     setSaving(true);
+    setActionError(null);
     try {
       const nextUrgentFee = isUrgent
         ? Math.round((order.subtotal * (settings.urgentSurchargePercent || 25)) / 100)
@@ -105,14 +131,24 @@ export const AdminOrderDetailModal: React.FC<AdminOrderDetailModalProps> = ({
         0,
         order.subtotal + order.deliveryFee + nextUrgentFee - Math.max(0, discountAmount)
       );
-      await adminUpdateOrderFields(order.orderId, {
+      const updates = {
         internalNotes,
         promisedDeliveryDate: promisedDate,
         urgent: isUrgent,
         urgentFee: nextUrgentFee,
         discountAmount: Math.max(0, discountAmount),
         totalAmount: nextTotal,
-      });
+      };
+      if (useServerApi) {
+        await updateOrderFieldsServer(order.orderId, updates);
+        await onRefreshData?.();
+      } else {
+        await adminUpdateOrderFields(order.orderId, updates);
+      }
+    } catch (err) {
+      setActionError(
+        err instanceof Error ? err.message : 'Erreur lors de l’enregistrement.'
+      );
     } finally {
       setSaving(false);
     }
@@ -227,6 +263,12 @@ export const AdminOrderDetailModal: React.FC<AdminOrderDetailModalProps> = ({
             <X className="w-5 h-5" />
           </button>
         </div>
+
+        {actionError && (
+          <p className="text-xs font-medium text-[#EF233C] bg-[#EF233C]/10 px-4 py-2.5 rounded-2xl">
+            {actionError}
+          </p>
+        )}
 
         {/* Status Transition + Notes */}
         <div className="grid md:grid-cols-2 gap-5">

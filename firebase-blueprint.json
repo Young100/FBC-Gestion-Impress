@@ -191,6 +191,24 @@
       },
       "required": ["email", "role", "invitedBy", "createdAt"]
     },
+    "StaffCredential": {
+      "title": "StaffCredential",
+      "description": "Accès atelier par identifiant unique généré côté serveur et mot de passe haché stocké et vérifié uniquement côté serveur",
+      "type": "object",
+      "properties": {
+        "accessId": { "type": "string", "maxLength": 40, "pattern": "^[A-Z0-9\\-]+$" },
+        "displayName": { "type": "string", "maxLength": 120 },
+        "role": { "type": "string", "enum": ["admin", "operator"] },
+        "passwordHash": { "type": "string", "maxLength": 256 },
+        "passwordSalt": { "type": "string", "maxLength": 128 },
+        "active": { "type": "boolean" },
+        "createdBy": { "type": "string", "maxLength": 120 },
+        "lastLoginAt": { "type": "string", "maxLength": 40 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["accessId", "displayName", "role", "passwordHash", "passwordSalt", "active", "createdBy", "createdAt", "updatedAt"]
+    },
     "AuditLog": {
       "title": "AuditLog",
       "description": "Journal immuable des actions sensibles d'administration",
@@ -255,6 +273,10 @@
     "/admin_invites/{email}": {
       "schema": { "$ref": "#/entities/AdminInvite" },
       "description": "Invitations pré-approuvées pour l'accès atelier"
+    },
+    "/staff_credentials/{accessId}": {
+      "schema": { "$ref": "#/entities/StaffCredential" },
+      "description": "Accès atelier par identifiant unique et mot de passe haché côté serveur"
     },
     "/audit_logs/{logId}": {
       "schema": { "$ref": "#/entities/AuditLog" },
