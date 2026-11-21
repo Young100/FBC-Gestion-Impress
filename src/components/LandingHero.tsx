@@ -14,6 +14,7 @@ import {
 import { getServiceImageSrc, SERVICE_IMAGES } from '../data/defaults';
 import { formatFcfa } from '../lib/pricing';
 import type { PrintService, ShopSettings } from '../types/fbc';
+import { PWAInstallButton } from './PWAInstallButton';
 
 interface LandingHeroProps {
   services: PrintService[];
@@ -89,6 +90,8 @@ export const LandingHero: React.FC<LandingHeroProps> = ({
               >
                 Voir les prestations
               </a>
+
+              <PWAInstallButton variant="hero" />
             </div>
 
             {/* Proof Metrics Row */}
@@ -400,6 +403,9 @@ export const LandingHero: React.FC<LandingHeroProps> = ({
                   >
                     Suivre une commande
                   </button>
+                </li>
+                <li>
+                  <PWAInstallButton variant="footer" />
                 </li>
               </ul>
             </div>

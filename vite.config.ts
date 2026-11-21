@@ -3,12 +3,129 @@ import react from '@vitejs/plugin-react';
 import fs from 'fs';
 import path from 'path';
 import {defineConfig} from 'vite';
+import {VitePWA} from 'vite-plugin-pwa';
 
 export default defineConfig(() => {
   return {
     plugins: [
       react(),
       tailwindcss(),
+      VitePWA({
+        registerType: 'autoUpdate',
+        includeAssets: [
+          'icon.svg',
+          'apple-touch-icon.png',
+          'pwa-192x192.png',
+          'pwa-512x512.png',
+          'pwa-maskable-512x512.png',
+          'atelier-icon.svg',
+          'atelier-apple-touch-icon.png',
+          'atelier-192x192.png',
+          'atelier-512x512.png',
+          'atelier-maskable-512x512.png',
+          'atelier-manifest.webmanifest',
+        ],
+        manifest: {
+          id: '/',
+          name: 'FBC Print — Commande & Suivi d’Impression',
+          short_name: 'FBC Print',
+          description:
+            'Commandez vos impressions grand format et supports pro sans compression, avec devis PDF et suivi en temps réel.',
+          lang: 'fr',
+          theme_color: '#26547C',
+          background_color: '#EDF2F4',
+          display: 'standalone',
+          orientation: 'any',
+          scope: '/',
+          start_url: '/',
+          categories: ['business', 'productivity'],
+          icons: [
+            {
+              src: 'pwa-192x192.png',
+              sizes: '192x192',
+              type: 'image/png',
+              purpose: 'any',
+            },
+            {
+              src: 'pwa-512x512.png',
+              sizes: '512x512',
+              type: 'image/png',
+              purpose: 'any',
+            },
+            {
+              src: 'pwa-maskable-512x512.png',
+              sizes: '512x512',
+              type: 'image/png',
+              purpose: 'maskable',
+            },
+          ],
+        },
+        workbox: {
+          globPatterns: ['**/*.{js,css,html,ico,png,svg,woff2}'],
+          maximumFileSizeToCacheInBytes: 5 * 1024 * 1024,
+          navigateFallback: '/index.html',
+          navigateFallbackDenylist: [
+            /^\/api\//,
+            /^\/fbcprintgestionadmin/,
+            /^\/server-views\//,
+          ],
+          runtimeCaching: [
+            {
+              urlPattern: /^https:\/\/fonts\.googleapis\.com\/.*/i,
+              handler: 'StaleWhileRevalidate',
+              options: {
+                cacheName: 'google-fonts-stylesheets',
+                expiration: {
+                  maxEntries: 10,
+                  maxAgeSeconds: 60 * 60 * 24 * 30,
+                },
+              },
+            },
+            {
+              urlPattern: /^https:\/\/fonts\.gstatic\.com\/.*/i,
+              handler: 'CacheFirst',
+              options: {
+                cacheName: 'google-fonts-webfonts',
+                expiration: {
+                  maxEntries: 20,
+                  maxAgeSeconds: 60 * 60 * 24 * 365,
+                },
+                cacheableResponse: {
+                  statuses: [0, 200],
+                },
+              },
+            },
+          ],
+        },
+        devOptions: {
+          enabled: true,
+          type: 'module',
+          navigateFallback: 'index.html',
+        },
+      }),
+      // Ensures built dist/server-views/atelier.html keeps its own isolated
+      // atelier-manifest.webmanifest instead of the client manifest injected by VitePWA.
+      {
+        name: 'preserve-atelier-pwa-manifest',
+        apply: 'build',
+        closeBundle(error?: Error): void {
+          if (error) return;
+          const atelierHtml = path.resolve(
+            __dirname,
+            'dist/server-views/atelier.html'
+          );
+          if (!fs.existsSync(atelierHtml)) return;
+          let html = fs.readFileSync(atelierHtml, 'utf-8');
+          html = html.replace(/<link\s+rel="manifest"\s+href="\/manifest\.webmanifest"\s*\/?>/gi, '');
+          if (!html.includes('/atelier-manifest.webmanifest')) {
+            html = html.replace(
+              '</head>',
+              '  <link rel="manifest" href="/atelier-manifest.webmanifest" />\n  </head>'
+            );
+          }
+          fs.writeFileSync(atelierHtml, html, 'utf-8');
+        },
+      },
       // Copies src/assets into dist/ so root-relative URLs like
       // "/src/assets/images/..." (e.g. generate_image output) still resolve
       // in production builds. Do not remove.

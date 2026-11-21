@@ -28,6 +28,7 @@ import {
   type ShopSettings,
 } from '../types/fbc';
 import { PaymentDeclarationPanel } from './PaymentDeclarationPanel';
+import { useToast } from './ToastProvider';
 
 interface OrderTrackingViewProps {
   order: Order | null;
@@ -52,6 +53,7 @@ export const OrderTrackingView: React.FC<OrderTrackingViewProps> = ({
   onLookup,
   onResetOrder,
 }) => {
+  const { showToast } = useToast();
   const [orderNumber, setOrderNumber] = useState('');
   const [phone, setPhone] = useState('');
   const [lookupError, setLookupError] = useState<string | null>(null);
@@ -176,6 +178,13 @@ export const OrderTrackingView: React.FC<OrderTrackingViewProps> = ({
     navigator.clipboard.writeText(trackingUrl);
     setCopiedLink(true);
     setTimeout(() => setCopiedLink(false), 2000);
+    showToast({
+      id: 'tracking_link_copied',
+      title: 'Lien privé copié',
+      message: 'Conservez ce lien pour suivre votre commande à tout moment.',
+      variant: 'info',
+      durationMs: 4000,
+    });
   };
 
   const handleReupload = async (oldFileId: string, itemId: string, slotKey: string, slotLabel: string, prevVersion: number, file: File) => {
@@ -195,6 +204,14 @@ export const OrderTrackingView: React.FC<OrderTrackingViewProps> = ({
       );
       const uploaded = await promise;
       await reuploadCorrectedFile(order, oldFileId, uploaded);
+      showToast({
+        id: `reupload_ok_${oldFileId}`,
+        badge: order.orderNumber,
+        title: 'Fichier corrigé transmis',
+        message: `${uploaded.originalName} a été envoyé à l’atelier pour vérification.`,
+        variant: 'success',
+        durationMs: 6000,
+      });
     } catch (err) {
       setReuploadError(
         err instanceof Error ? err.message : 'Erreur lors du renvoi du fichier.'

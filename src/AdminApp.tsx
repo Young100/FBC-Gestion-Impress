@@ -5,6 +5,8 @@ import { createOrderInFirestore, subscribePublicCatalog } from './lib/firestoreA
 import type { Order, PaymentMethod, PrintService, ShopSettings } from './types/fbc';
 import { AdminSpace } from './components/AdminSpace';
 import { ErrorBoundary } from './components/ErrorBoundary';
+import { OfflineIndicator } from './components/OfflineIndicator';
+import { PWAInstallButton } from './components/PWAInstallButton';
 
 export default function AdminApp() {
   const [settings, setSettings] = useState<ShopSettings>(DEFAULT_SETTINGS);
@@ -89,17 +91,27 @@ export default function AdminApp() {
               </span>
             </div>
 
-            <a
-              href="/"
-              target="_blank"
-              rel="noopener noreferrer"
-              className="inline-flex items-center gap-1.5 px-4 py-2 rounded-full bg-[#EDF2F4] text-[#26547C] text-xs sm:text-sm font-semibold hover:bg-[#26547C] hover:text-white transition-colors min-h-[40px]"
-            >
-              Site client
-              <ExternalLink className="w-3.5 h-3.5" />
-            </a>
+            <div className="flex items-center gap-2 shrink-0">
+              <PWAInstallButton
+                variant="compact"
+                appName="FBC Atelier"
+                iconSrc="/atelier-192x192.png"
+                buttonLabel="Installer l’app Atelier"
+              />
+              <a
+                href="/"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center gap-1.5 px-4 py-2 rounded-full bg-[#EDF2F4] text-[#26547C] text-xs sm:text-sm font-semibold hover:bg-[#26547C] hover:text-white transition-colors min-h-[40px]"
+              >
+                Site client
+                <ExternalLink className="w-3.5 h-3.5" />
+              </a>
+            </div>
           </div>
         </header>
+
+        <OfflineIndicator />
 
         {reprintNotice && (
           <div className="max-w-7xl mx-auto w-full px-4 sm:px-6 lg:px-8 pt-4">
@@ -117,6 +129,18 @@ export default function AdminApp() {
             onReprintOrder={handleReprintOrder}
           />
         </main>
+
+        <footer className="border-t border-slate-200/80 bg-white/80 py-4 px-4 sm:px-6 lg:px-8">
+          <div className="max-w-7xl mx-auto flex flex-col sm:flex-row items-center justify-between gap-2 text-xs text-slate-500">
+            <span>FBC Atelier — Application dédiée à l’équipe d’impression</span>
+            <PWAInstallButton
+              variant="footer"
+              appName="FBC Atelier"
+              iconSrc="/atelier-192x192.png"
+              buttonLabel="Installer FBC Atelier sur mobile & PC"
+            />
+          </div>
+        </footer>
       </div>
     </ErrorBoundary>
   );

@@ -1893,7 +1893,11 @@ async function startServer() {
       try {
         const adminHtmlPath = path.resolve(process.cwd(), 'server-views/atelier.html');
         const template = fs.readFileSync(adminHtmlPath, 'utf-8');
-        const html = await vite.transformIndexHtml(req.originalUrl, template);
+        let html = await vite.transformIndexHtml(req.originalUrl, template);
+        html = html.replace(
+          /<link\s+rel="manifest"\s+href="\/manifest\.webmanifest"\s*\/?>/gi,
+          ''
+        );
         res.status(200);
         res.setHeader('Content-Type', 'text/html');
         res.setHeader('Cache-Control', 'no-store');
