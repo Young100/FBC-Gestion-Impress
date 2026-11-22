@@ -74,6 +74,7 @@ import {
 import { AdminOrderDetailModal } from './AdminOrderDetailModal';
 import { AdminSettingsTabs } from './AdminSettingsTabs';
 import { DashboardCharts } from './DashboardCharts';
+import { NotificationPermissionPrompt } from './NotificationPermissionPrompt';
 import { useToast } from './ToastProvider';
 import {
   buildAdminChangeAlerts,
@@ -85,6 +86,7 @@ import {
   ATELIER_SOUND_KEY,
   dispatchNativeNotification,
   getBrowserNotifPermission,
+  initAudioUnlock,
   isAudioChimeEnabled,
   isBrowserNotifEnabled,
   playNotificationChime,
@@ -146,6 +148,17 @@ export const AdminSpace: React.FC<AdminSpaceProps> = ({
   const [soundEnabled, setSoundEnabledState] = useState<boolean>(() =>
     isAudioChimeEnabled(ATELIER_SOUND_KEY)
   );
+  const [promptDismissed, setPromptDismissed] = useState<boolean>(() => {
+    try {
+      return window.sessionStorage.getItem('fbc_atelier_notif_prompt_dismissed') === '1';
+    } catch {
+      return false;
+    }
+  });
+
+  useEffect(() => {
+    return initAudioUnlock();
+  }, []);
 
   const ordersReadyRef = useRef(false);
   const paymentsReadyRef = useRef(false);
@@ -1098,6 +1111,21 @@ export const AdminSpace: React.FC<AdminSpaceProps> = ({
           </button>
         </div>
       </div>
+
+      <NotificationPermissionPrompt
+        mode="atelier"
+        permission={notifPermission}
+        dismissed={promptDismissed}
+        onEnable={() => void handleToggleBrowserPopups()}
+        onDismiss={() => {
+          setPromptDismissed(true);
+          try {
+            window.sessionStorage.setItem('fbc_atelier_notif_prompt_dismissed', '1');
+          } catch {
+            // Ignore storage errors
+          }
+        }}
+      />
 
       {dataError && (
         <div className="bg-[#EF233C]/10 border border-[#EF233C]/25 text-[#EF233C] text-xs font-medium px-4 py-3 rounded-2xl">

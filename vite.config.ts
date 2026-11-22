@@ -5,7 +5,7 @@ import path from 'path';
 import {defineConfig} from 'vite';
 import {VitePWA} from 'vite-plugin-pwa';
 
-export default defineConfig(() => {
+export default defineConfig(({command}) => {
   return {
     plugins: [
       react(),
@@ -56,6 +56,9 @@ export default defineConfig(() => {
           ],
         },
         workbox: {
+          ...(command === 'build'
+            ? {importScripts: ['/client-sw-notifications.js']}
+            : {}),
           globPatterns: ['**/*.{js,css,html,ico,png,svg,woff2}'],
           maximumFileSizeToCacheInBytes: 5 * 1024 * 1024,
           navigateFallback: '/index.html',

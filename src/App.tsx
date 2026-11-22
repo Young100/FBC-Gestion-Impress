@@ -16,6 +16,7 @@ import {
   CLIENT_SOUND_KEY,
   dispatchNativeNotification,
   getBrowserNotifPermission,
+  initAudioUnlock,
   isAudioChimeEnabled,
   isBrowserNotifEnabled,
   playNotificationChime,
@@ -67,6 +68,11 @@ function AppContent() {
   viewRef.current = view;
 
   const prevOrderSnapshotRef = useRef<OrderSnapshotState | null>(null);
+
+  // Unlock WebAudio context on first user interaction so future live chimes play reliably
+  useEffect(() => {
+    return initAudioUnlock();
+  }, []);
 
   // Subscribe to public shop settings, services catalog, and payment methods
   useEffect(() => {

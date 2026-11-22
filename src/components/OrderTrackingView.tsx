@@ -43,6 +43,7 @@ import {
   type PaymentMethod,
   type ShopSettings,
 } from '../types/fbc';
+import { NotificationPermissionPrompt } from './NotificationPermissionPrompt';
 import { PaymentDeclarationPanel } from './PaymentDeclarationPanel';
 import { useToast } from './ToastProvider';
 
@@ -88,6 +89,13 @@ export const OrderTrackingView: React.FC<OrderTrackingViewProps> = ({
   const [soundEnabled, setSoundEnabledState] = useState<boolean>(() =>
     isAudioChimeEnabled(CLIENT_SOUND_KEY)
   );
+  const [promptDismissed, setPromptDismissed] = useState<boolean>(() => {
+    try {
+      return window.sessionStorage.getItem('fbc_client_notif_prompt_dismissed') === '1';
+    } catch {
+      return false;
+    }
+  });
 
   const handleSearch = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -355,6 +363,21 @@ export const OrderTrackingView: React.FC<OrderTrackingViewProps> = ({
 
   return (
     <div className="max-w-5xl mx-auto px-4 sm:px-6 py-8 sm:py-10 space-y-6">
+      <NotificationPermissionPrompt
+        mode="client"
+        permission={notifPermission}
+        dismissed={promptDismissed}
+        onEnable={() => void handleToggleClientPopups()}
+        onDismiss={() => {
+          setPromptDismissed(true);
+          try {
+            window.sessionStorage.setItem('fbc_client_notif_prompt_dismissed', '1');
+          } catch {
+            // Ignore storage errors
+          }
+        }}
+      />
+
       {/* Top Bar */}
       <div className="bg-white rounded-3xl p-6 sm:p-8 border border-slate-200 shadow-sm space-y-6">
         <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
