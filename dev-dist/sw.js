@@ -78,11 +78,11 @@ define(['./workbox-a454db71'], (function (workbox) { 'use strict';
    */
   workbox.precacheAndRoute([{
     "url": "/index.html",
-    "revision": "0.niktes3jko8"
+    "revision": "0.npv8vgb9ldg"
   }], {});
   workbox.cleanupOutdatedCaches();
   workbox.registerRoute(new workbox.NavigationRoute(workbox.createHandlerBoundToURL("/index.html"), {
-    allowlist: [/^\/$/],
+    allowlist: [/^\/client(\/.*)?$/],
     denylist: [/^\/api\//, /^\/fbcprintgestionadmin/, /^\/server-views\//]
   }));
   workbox.registerRoute(/^https:\/\/fonts\.googleapis\.com\/.*/i, new workbox.StaleWhileRevalidate({

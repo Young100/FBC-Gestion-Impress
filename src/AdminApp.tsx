@@ -99,7 +99,7 @@ export default function AdminApp() {
                 buttonLabel="Installer l’app Atelier"
               />
               <a
-                href="/"
+                href="/client/"
                 target="_blank"
                 rel="noopener noreferrer"
                 className="inline-flex items-center gap-1.5 px-4 py-2 rounded-full bg-[#EDF2F4] text-[#26547C] text-xs sm:text-sm font-semibold hover:bg-[#26547C] hover:text-white transition-colors min-h-[40px]"

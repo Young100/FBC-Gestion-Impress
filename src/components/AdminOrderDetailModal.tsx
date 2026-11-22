@@ -195,7 +195,7 @@ export const AdminOrderDetailModal: React.FC<AdminOrderDetailModalProps> = ({
   };
 
   const whatsappClean = order.customerPhone.replace(/\D/g, '');
-  const trackingLink = `${window.location.origin}/?track=${encodeURIComponent(order.orderId)}`;
+  const trackingLink = `${window.location.origin}/client/?track=${encodeURIComponent(order.orderId)}`;
   const messageTemplates = [
     {
       label: 'Commande reçue',

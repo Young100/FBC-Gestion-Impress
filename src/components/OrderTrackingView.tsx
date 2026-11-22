@@ -168,7 +168,7 @@ export const OrderTrackingView: React.FC<OrderTrackingViewProps> = ({
   };
   const activeStepIndex = getStepIndex();
 
-  const trackingUrl = `${window.location.origin}/?track=${encodeURIComponent(order.orderId)}`;
+  const trackingUrl = `${window.location.origin}/client/?track=${encodeURIComponent(order.orderId)}`;
   const whatsappClean = settings.whatsapp.replace(/\D/g, '');
   const whatsappHref = `https://wa.me/${whatsappClean}?text=${encodeURIComponent(
     `Bonjour FBC Print, je souhaite avoir des informations sur ma commande ${order.orderNumber} (code suivi ${order.trackingCode}).`

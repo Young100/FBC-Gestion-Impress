@@ -12,21 +12,16 @@ export default defineConfig(() => {
       tailwindcss(),
       VitePWA({
         registerType: 'autoUpdate',
+        scope: '/client/',
         includeAssets: [
           'icon.svg',
           'apple-touch-icon.png',
           'pwa-192x192.png',
           'pwa-512x512.png',
           'pwa-maskable-512x512.png',
-          'atelier-icon.svg',
-          'atelier-apple-touch-icon.png',
-          'atelier-192x192.png',
-          'atelier-512x512.png',
-          'atelier-maskable-512x512.png',
-          'atelier-manifest.webmanifest',
         ],
         manifest: {
-          id: '/',
+          id: '/client/',
           name: 'FBC Print — Commande & Suivi d’Impression',
           short_name: 'FBC Print',
           description:
@@ -36,24 +31,24 @@ export default defineConfig(() => {
           background_color: '#EDF2F4',
           display: 'standalone',
           orientation: 'any',
-          scope: '/',
-          start_url: '/',
+          scope: '/client/',
+          start_url: '/client/',
           categories: ['business', 'productivity'],
           icons: [
             {
-              src: 'pwa-192x192.png',
+              src: '/pwa-192x192.png',
               sizes: '192x192',
               type: 'image/png',
               purpose: 'any',
             },
             {
-              src: 'pwa-512x512.png',
+              src: '/pwa-512x512.png',
               sizes: '512x512',
               type: 'image/png',
               purpose: 'any',
             },
             {
-              src: 'pwa-maskable-512x512.png',
+              src: '/pwa-maskable-512x512.png',
               sizes: '512x512',
               type: 'image/png',
               purpose: 'maskable',
@@ -64,6 +59,7 @@ export default defineConfig(() => {
           globPatterns: ['**/*.{js,css,html,ico,png,svg,woff2}'],
           maximumFileSizeToCacheInBytes: 5 * 1024 * 1024,
           navigateFallback: '/index.html',
+          navigateFallbackAllowlist: [/^\/client(\/.*)?$/],
           navigateFallbackDenylist: [
             /^\/api\//,
             /^\/fbcprintgestionadmin/,
@@ -101,6 +97,7 @@ export default defineConfig(() => {
           enabled: true,
           type: 'module',
           navigateFallback: 'index.html',
+          navigateFallbackAllowlist: [/^\/client(\/.*)?$/],
         },
       }),
       // Ensures built dist/server-views/atelier.html keeps its own isolated

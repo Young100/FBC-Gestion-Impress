@@ -1,5 +1,6 @@
 import express from 'express';
 import fs from 'fs';
+import http from 'http';
 import path from 'path';
 import crypto from 'crypto';
 import { createRequire } from 'module';
@@ -1882,14 +1883,48 @@ async function startServer() {
     res.status(404).send('Not Found');
   });
 
+  const httpServer = http.createServer(app);
+
+  const withQuery = (req: express.Request, targetPath: string) => {
+    const qIdx = req.originalUrl.indexOf('?');
+    return qIdx >= 0 ? `${targetPath}${req.originalUrl.slice(qIdx)}` : targetPath;
+  };
+
+  app.get('/', (req, res) => {
+    res.redirect(302, withQuery(req, '/client/'));
+  });
+  app.get('/client', (req, res, next) => {
+    if (req.path === '/client') {
+      res.redirect(302, withQuery(req, '/client/'));
+      return;
+    }
+    next();
+  });
+  app.get('/fbcprintgestionadmin', (req, res, next) => {
+    if (req.path === '/fbcprintgestionadmin') {
+      res.redirect(302, withQuery(req, '/fbcprintgestionadmin/'));
+      return;
+    }
+    next();
+  });
+
   // Mount Vite middleware in dev, or serve static dist in production
   if (process.env.NODE_ENV !== 'production') {
+    app.get('/fbcprintgestionadmin/sw.js', (_req, res) => {
+      res.setHeader('Content-Type', 'application/javascript; charset=utf-8');
+      res.setHeader('Cache-Control', 'no-cache');
+      res.sendFile(path.resolve(process.cwd(), 'public/fbcprintgestionadmin/sw.js'));
+    });
+
     const vite = await createViteServer({
-      server: { middlewareMode: true },
+      server: {
+        middlewareMode: true,
+        ws: { server: httpServer },
+      },
       appType: 'spa',
     });
 
-    app.get(/^\/fbcprintgestionadmin(\/.*)?$/i, async (req, res, next) => {
+    app.get(/^\/fbcprintgestionadmin\/.*$/i, async (req, res, next) => {
       try {
         const adminHtmlPath = path.resolve(process.cwd(), 'server-views/atelier.html');
         const template = fs.readFileSync(adminHtmlPath, 'utf-8');
@@ -1913,13 +1948,27 @@ async function startServer() {
   } else {
     const distDir = path.resolve(process.cwd(), 'dist');
 
-    app.get(/^\/fbcprintgestionadmin(\/.*)?$/i, (_req, res) => {
+    app.get('/fbcprintgestionadmin/sw.js', (_req, res) => {
+      res.setHeader('Content-Type', 'application/javascript; charset=utf-8');
+      res.setHeader('Cache-Control', 'no-cache');
+      res.sendFile(path.join(distDir, 'fbcprintgestionadmin/sw.js'));
+    });
+
+    app.get(/^\/fbcprintgestionadmin\/.*$/i, (_req, res) => {
       res.setHeader('Cache-Control', 'no-store');
       res.setHeader('X-Robots-Tag', 'noindex, nofollow');
       res.sendFile(path.join(distDir, 'server-views/atelier.html'));
     });
 
-    app.use(express.static(distDir));
+    app.use(
+      express.static(distDir, {
+        setHeaders: (res, filePath) => {
+          if (filePath.endsWith('.webmanifest')) {
+            res.setHeader('Content-Type', 'application/manifest+json; charset=utf-8');
+          }
+        },
+      })
+    );
     app.get('*', (_req, res) => {
       res.sendFile(path.join(distDir, 'index.html'));
     });
@@ -1940,7 +1989,7 @@ async function startServer() {
     }
   );
 
-  app.listen(PORT, '0.0.0.0', () => {
+  httpServer.listen(PORT, '0.0.0.0', () => {
     console.log(`FBC Print server listening on http://localhost:${PORT}`);
   });
 }

@@ -150,7 +150,7 @@ function AppContent() {
     setTrackedOrder(order);
     saveTrackedOrderId(order.orderId);
     setView('track');
-    window.history.replaceState({}, '', `?track=${encodeURIComponent(order.orderId)}`);
+    window.history.replaceState({}, '', `/client/?track=${encodeURIComponent(order.orderId)}`);
     window.scrollTo({ top: 0, behavior: 'smooth' });
     showToast({
       id: `order_created_${order.orderId}`,
@@ -208,7 +208,7 @@ function AppContent() {
               setTrackedOrderId(null);
               setTrackedOrder(null);
               saveTrackedOrderId(null);
-              window.history.replaceState({}, '', '/');
+              window.history.replaceState({}, '', '/client/');
             }}
           />
         )}

@@ -2499,7 +2499,7 @@ export const OrderWizard: React.FC<OrderWizardProps> = ({
               <button
                 type="button"
                 onClick={() => {
-                  const link = `${window.location.origin}/?track=${encodeURIComponent(
+                  const link = `${window.location.origin}/client/?track=${encodeURIComponent(
                     createdOrder.orderId
                   )}`;
                   navigator.clipboard.writeText(link);
