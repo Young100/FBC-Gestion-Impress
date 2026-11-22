@@ -27,7 +27,7 @@ import {
   setBrowserNotifEnabled,
   type BrowserNotifPermission,
 } from '../lib/browserNotifications';
-import { reuploadCorrectedFile } from '../lib/firestoreApi';
+import { reuploadClientCorrectedFile } from '../lib/clientApi';
 import { generateQuotePdf, generateReceiptPdf } from '../lib/pdfGenerator';
 import {
   formatBytes,
@@ -39,20 +39,27 @@ import { startResumableUpload } from '../lib/uploadClient';
 import {
   ORDER_STATUS_META,
   PAYMENT_STATUS_META,
+  type ClientAccountPublic,
   type Order,
   type PaymentMethod,
   type ShopSettings,
 } from '../types/fbc';
+import { ClientAuthPanel } from './ClientAuthPanel';
 import { NotificationPermissionPrompt } from './NotificationPermissionPrompt';
 import { PaymentDeclarationPanel } from './PaymentDeclarationPanel';
 import { useToast } from './ToastProvider';
 
 interface OrderTrackingViewProps {
   order: Order | null;
+  clientAccount: ClientAccountPublic | null;
   settings: ShopSettings;
   paymentMethods: PaymentMethod[];
-  onLookup: (orderNumber: string, phone: string) => Promise<string | null>;
-  onResetOrder: () => void;
+  initialTrackingCode?: string;
+  securityNotice?: string | null;
+  onAuthenticated: (account: ClientAccountPublic, claimedOrder?: Order) => void;
+  onOpenCode: (trackingCode: string) => Promise<string | null>;
+  onOrderUpdated: (order: Order) => void;
+  onBackToOrders: () => void;
 }
 
 const TIMELINE_STEPS = [
@@ -65,16 +72,26 @@ const TIMELINE_STEPS = [
 
 export const OrderTrackingView: React.FC<OrderTrackingViewProps> = ({
   order,
+  clientAccount,
   settings,
   paymentMethods,
-  onLookup,
-  onResetOrder,
+  initialTrackingCode = '',
+  securityNotice = null,
+  onAuthenticated,
+  onOpenCode,
+  onOrderUpdated,
+  onBackToOrders,
 }) => {
   const { showToast } = useToast();
-  const [orderNumber, setOrderNumber] = useState('');
-  const [phone, setPhone] = useState('');
+  const [trackingCode, setTrackingCode] = useState(initialTrackingCode);
   const [lookupError, setLookupError] = useState<string | null>(null);
   const [searching, setSearching] = useState(false);
+
+  React.useEffect(() => {
+    if (initialTrackingCode) {
+      setTrackingCode(initialTrackingCode);
+    }
+  }, [initialTrackingCode]);
   const [showPaymentForm, setShowPaymentForm] = useState(false);
   const [copiedLink, setCopiedLink] = useState(false);
   const [reuploadingSlot, setReuploadingSlot] = useState<string | null>(null);
@@ -100,13 +117,20 @@ export const OrderTrackingView: React.FC<OrderTrackingViewProps> = ({
   const handleSearch = async (e: React.FormEvent) => {
     e.preventDefault();
     setLookupError(null);
-    if (!orderNumber.trim() || !phone.trim()) {
-      setLookupError('Saisissez votre numéro de commande et votre numéro de téléphone.');
+    const trimmedCode = trackingCode.trim().toUpperCase();
+    if (!trimmedCode) {
+      setLookupError('Saisissez votre code de suivi (ex : FBC-A7K9M2).');
+      return;
+    }
+    if (trimmedCode.startsWith('CMD-')) {
+      setLookupError(
+        'Le suivi s’effectue avec votre code de suivi (ex : FBC-A7K9M2) et non avec le numéro de commande.'
+      );
       return;
     }
     setSearching(true);
     try {
-      const err = await onLookup(orderNumber, phone);
+      const err = await onOpenCode(trimmedCode);
       if (err) setLookupError(err);
     } finally {
       setSearching(false);
@@ -114,6 +138,25 @@ export const OrderTrackingView: React.FC<OrderTrackingViewProps> = ({
   };
 
   if (!order) {
+    if (!clientAccount) {
+      return (
+        <div className="max-w-xl mx-auto px-4 py-10 sm:py-12">
+          <ClientAuthPanel
+            initialMode="login"
+            prefilledTrackingCode={initialTrackingCode}
+            notice={
+              securityNotice ||
+              (initialTrackingCode
+                ? `Connectez-vous à votre compte client pour consulter la commande ${initialTrackingCode} en toute confidentialité.`
+                : 'Connectez-vous ou créez votre compte client pour suivre vos commandes en toute sécurité.')
+            }
+            shopWhatsapp={settings.whatsapp}
+            onAuthenticated={onAuthenticated}
+          />
+        </div>
+      );
+    }
+
     return (
       <div className="max-w-2xl mx-auto px-4 py-12">
         <div className="bg-white rounded-3xl p-8 border border-slate-200 shadow-sm space-y-6">
@@ -124,46 +167,34 @@ export const OrderTrackingView: React.FC<OrderTrackingViewProps> = ({
               className="h-24 mx-auto object-contain"
             />
             <h1 className="font-display text-2xl sm:text-3xl text-[#26547C]">
-              Suivi de commande à distance
+              Ouvrir une commande par code de suivi
             </h1>
             <p className="text-sm text-slate-600">
-              Retrouvez votre commande sans vous déplacer grâce à votre numéro de commande
-              et votre téléphone.
+              Connecté en tant que <strong className="text-[#26547C]">@{clientAccount.username}</strong> ({clientAccount.phone}). Saisissez un code de suivi appartenant à votre compte ou une commande passée en atelier.
             </p>
           </div>
+
+          {securityNotice && (
+            <div className="text-xs sm:text-sm font-medium text-[#EF233C] bg-[#EF233C]/10 border border-[#EF233C]/25 px-4 py-3 rounded-2xl">
+              {securityNotice}
+            </div>
+          )}
 
           <form onSubmit={handleSearch} className="space-y-4">
             <div>
               <label
-                htmlFor="track-order-num"
+                htmlFor="track-order-code"
                 className="block text-sm font-medium text-slate-700 mb-1.5"
               >
-                Numéro de commande
+                Code de suivi
               </label>
               <input
-                id="track-order-num"
+                id="track-order-code"
                 type="text"
-                value={orderNumber}
-                onChange={(e) => setOrderNumber(e.target.value)}
-                placeholder="Ex : CMD-2026-0042"
-                className="w-full px-4 py-3 rounded-2xl bg-[#EDF2F4] border border-transparent focus:border-[#119DA4] focus:bg-white focus:outline-none text-base min-h-[44px]"
-              />
-            </div>
-
-            <div>
-              <label
-                htmlFor="track-phone"
-                className="block text-sm font-medium text-slate-700 mb-1.5"
-              >
-                Numéro de téléphone / WhatsApp
-              </label>
-              <input
-                id="track-phone"
-                type="tel"
-                value={phone}
-                onChange={(e) => setPhone(e.target.value)}
-                placeholder="Ex : +226 74 67 77 08"
-                className="w-full px-4 py-3 rounded-2xl bg-[#EDF2F4] border border-transparent focus:border-[#119DA4] focus:bg-white focus:outline-none text-base min-h-[44px]"
+                value={trackingCode}
+                onChange={(e) => setTrackingCode(e.target.value.toUpperCase())}
+                placeholder="Ex : FBC-A7K9M2"
+                className="w-full px-4 py-3 rounded-2xl bg-[#EDF2F4] border border-transparent focus:border-[#119DA4] focus:bg-white focus:outline-none text-base font-mono uppercase min-h-[44px]"
               />
             </div>
 
@@ -179,7 +210,15 @@ export const OrderTrackingView: React.FC<OrderTrackingViewProps> = ({
               className="w-full inline-flex items-center justify-center gap-2 px-6 py-4 rounded-full bg-[#26547C] text-white font-semibold text-base hover:bg-[#1e4466] transition-colors min-h-[48px]"
             >
               <Search className="w-5 h-5" />
-              {searching ? 'Recherche en cours...' : 'Consulter ma commande'}
+              {searching ? 'Vérification en cours...' : 'Consulter cette commande'}
+            </button>
+
+            <button
+              type="button"
+              onClick={onBackToOrders}
+              className="w-full inline-flex items-center justify-center gap-2 px-6 py-3 rounded-full bg-[#EDF2F4] text-[#26547C] font-semibold text-sm hover:bg-[#26547C]/10 transition-colors min-h-[44px]"
+            >
+              Voir toutes mes commandes
             </button>
           </form>
         </div>
@@ -201,7 +240,7 @@ export const OrderTrackingView: React.FC<OrderTrackingViewProps> = ({
   };
   const activeStepIndex = getStepIndex();
 
-  const trackingUrl = `${window.location.origin}/client/?track=${encodeURIComponent(order.orderId)}`;
+  const trackingUrl = `${window.location.origin}/client/?code=${encodeURIComponent(order.trackingCode)}`;
   const whatsappClean = settings.whatsapp.replace(/\D/g, '');
   const whatsappHref = `https://wa.me/${whatsappClean}?text=${encodeURIComponent(
     `Bonjour FBC Print, je souhaite avoir des informations sur ma commande ${order.orderNumber} (code suivi ${order.trackingCode}).`
@@ -214,9 +253,9 @@ export const OrderTrackingView: React.FC<OrderTrackingViewProps> = ({
     showToast({
       id: 'tracking_link_copied',
       title: 'Lien privé copié',
-      message: 'Conservez ce lien pour suivre votre commande à tout moment.',
+      message: `Seul votre compte client connecté peut ouvrir ce lien (${order.trackingCode}).`,
       variant: 'info',
-      durationMs: 4000,
+      durationMs: 4500,
     });
   };
 
@@ -269,7 +308,7 @@ export const OrderTrackingView: React.FC<OrderTrackingViewProps> = ({
           tag: `fbc-client-welcome-${order.orderId}`,
           icon: '/pwa-192x192.png',
           badge: '/pwa-192x192.png',
-          url: `/client/?track=${encodeURIComponent(order.orderId)}`,
+          url: `/client/?code=${encodeURIComponent(order.trackingCode)}`,
           swScope: '/client/',
         });
       } else {
@@ -304,7 +343,7 @@ export const OrderTrackingView: React.FC<OrderTrackingViewProps> = ({
         tag: `fbc-client-welcome-${order.orderId}`,
         icon: '/pwa-192x192.png',
         badge: '/pwa-192x192.png',
-        url: `/client/?track=${encodeURIComponent(order.orderId)}`,
+        url: `/client/?code=${encodeURIComponent(order.trackingCode)}`,
         swScope: '/client/',
       });
     } else if (result === 'denied') {
@@ -339,11 +378,14 @@ export const OrderTrackingView: React.FC<OrderTrackingViewProps> = ({
           slotKey,
           slotLabel,
           version: prevVersion + 1,
+          purpose: 'order_file',
+          authMode: 'client',
         },
         (st) => setReuploadProgress(st.percent)
       );
       const uploaded = await promise;
-      await reuploadCorrectedFile(order, oldFileId, uploaded);
+      const updatedOrder = await reuploadClientCorrectedFile(order.orderId, oldFileId, uploaded);
+      onOrderUpdated(updatedOrder);
       showToast({
         id: `reupload_ok_${oldFileId}`,
         badge: order.orderNumber,
@@ -453,10 +495,10 @@ export const OrderTrackingView: React.FC<OrderTrackingViewProps> = ({
             </button>
             <button
               type="button"
-              onClick={onResetOrder}
+              onClick={onBackToOrders}
               className="px-4 py-2.5 rounded-full border border-slate-200 text-slate-600 text-sm font-medium hover:text-[#26547C] min-h-[44px]"
             >
-              Autre commande
+              ← Mes commandes
             </button>
           </div>
         </div>
@@ -596,6 +638,7 @@ export const OrderTrackingView: React.FC<OrderTrackingViewProps> = ({
           order={order}
           paymentMethods={paymentMethods}
           settings={settings}
+          onOrderUpdated={onOrderUpdated}
           onSuccess={() => setShowPaymentForm(false)}
           onCancel={() => setShowPaymentForm(false)}
         />

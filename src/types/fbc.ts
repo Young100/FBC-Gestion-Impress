@@ -206,6 +206,7 @@ export interface Order {
   trackingCode: string;
   quoteNumber: string;
   receiptNumber?: string;
+  clientAccountId?: string;
   customerName: string;
   customerPhone: string;
   isWhatsapp: boolean;
@@ -239,6 +240,22 @@ export interface Order {
   createdAt: unknown;
   updatedAt: unknown;
   createdAtIso?: string;
+}
+
+export interface ClientAccountPublic {
+  accountId: string;
+  username: string;
+  fullName: string;
+  phone: string;
+  phoneNormalized: string;
+  mustChangePassword?: boolean;
+  active: boolean;
+  lastLoginAt?: string;
+  createdAt?: string;
+}
+
+export interface AdminClientAccountSummary extends ClientAccountPublic {
+  ordersCount: number;
 }
 
 export interface Payment {

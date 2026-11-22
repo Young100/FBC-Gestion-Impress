@@ -7,7 +7,7 @@ import {
   Loader2,
   ShieldCheck,
 } from 'lucide-react';
-import { submitClientPayment } from '../lib/firestoreApi';
+import { declareClientPayment } from '../lib/clientApi';
 import { formatFcfa, normalizeBurkinaPhone } from '../lib/pricing';
 import { startResumableUpload } from '../lib/uploadClient';
 import type { Order, PaymentMethod, ShopSettings } from '../types/fbc';
@@ -17,6 +17,7 @@ interface PaymentDeclarationPanelProps {
   paymentMethods: PaymentMethod[];
   settings: ShopSettings;
   onSuccess: () => void;
+  onOrderUpdated?: (order: Order) => void;
   onCancel?: () => void;
 }
 
@@ -25,6 +26,7 @@ export const PaymentDeclarationPanel: React.FC<PaymentDeclarationPanelProps> = (
   paymentMethods,
   settings,
   onSuccess,
+  onOrderUpdated,
   onCancel,
 }) => {
   const activeMethods = paymentMethods.filter((m) => m.active);
@@ -99,15 +101,17 @@ export const PaymentDeclarationPanel: React.FC<PaymentDeclarationPanelProps> = (
           itemId: 'payment_proof',
           slotKey: 'screenshot',
           slotLabel: `Capture paiement ${selectedMethod.operatorName}`,
+          purpose: 'payment_proof',
+          authMode: 'client',
         },
         (st) => setUploadPercent(st.percent)
       );
 
       const uploadedMeta = await promise;
 
-      await submitClientPayment({
-        order,
-        method: selectedMethod,
+      const res = await declareClientPayment(order.orderId, {
+        methodId: selectedMethod.id,
+        methodName: selectedMethod.operatorName,
         depositPhone: phoneCheck.normalized,
         transactionRef,
         declaredAmount: amountToPay,
@@ -115,6 +119,10 @@ export const PaymentDeclarationPanel: React.FC<PaymentDeclarationPanelProps> = (
         screenshotFileId: uploadedMeta.fileId,
         screenshotPreviewUrl: `/api/files/${uploadedMeta.fileId}/preview`,
       });
+
+      if (res.order && onOrderUpdated) {
+        onOrderUpdated(res.order);
+      }
 
       onSuccess();
     } catch (err) {

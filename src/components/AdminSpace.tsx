@@ -28,6 +28,7 @@ import {
   clearStaffSessionToken,
   createManualOrderServer,
   fetchAdminBootstrap,
+  fetchStaffProtectedBlobUrl,
   fetchStaffSession,
   loginWithStaffCredentials,
   logoutStaffSession,
@@ -194,6 +195,47 @@ export const AdminSpace: React.FC<AdminSpaceProps> = ({
   const [rejectTarget, setRejectTarget] = useState<Payment | null>(null);
   const [rejectReason, setRejectReason] = useState('');
   const [screenshotModalUrl, setScreenshotModalUrl] = useState<string | null>(null);
+  const [screenshotBlobUrl, setScreenshotBlobUrl] = useState<string | null>(null);
+  const [screenshotError, setScreenshotError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!screenshotModalUrl) {
+      setScreenshotBlobUrl(null);
+      setScreenshotError(null);
+      return;
+    }
+    if (!screenshotModalUrl.startsWith('/api/files/')) {
+      setScreenshotBlobUrl(screenshotModalUrl);
+      setScreenshotError(null);
+      return;
+    }
+    let active = true;
+    let objectUrl: string | null = null;
+    setScreenshotBlobUrl(null);
+    setScreenshotError(null);
+
+    fetchStaffProtectedBlobUrl(screenshotModalUrl)
+      .then((url) => {
+        if (!active) {
+          URL.revokeObjectURL(url);
+          return;
+        }
+        objectUrl = url;
+        setScreenshotBlobUrl(url);
+      })
+      .catch((err) => {
+        if (active) {
+          setScreenshotError(
+            err instanceof Error ? err.message : 'Impossible de charger la capture.'
+          );
+        }
+      });
+
+    return () => {
+      active = false;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [screenshotModalUrl]);
 
   // Payment method editor
   const [editingMethod, setEditingMethod] = useState<PaymentMethod | null>(null);
@@ -1887,7 +1929,12 @@ export const AdminSpace: React.FC<AdminSpaceProps> = ({
           clients={clients}
           auditLogs={auditLogs}
           settings={settings}
-          onReprintOrder={onReprintOrder}
+          onReprintOrder={async (ord) => {
+            await onReprintOrder(ord);
+            if (staffUser.authMethod === 'credentials') {
+              await refreshCredentialsData();
+            }
+          }}
           onRefreshData={refreshCredentialsData}
         />
       )}
@@ -2103,11 +2150,19 @@ export const AdminSpace: React.FC<AdminSpaceProps> = ({
                 <X className="w-5 h-5" />
               </button>
             </div>
-            <img
-              src={screenshotModalUrl}
-              alt="Capture de paiement"
-              className="max-h-[70vh] mx-auto rounded-2xl object-contain"
-            />
+            {screenshotError ? (
+              <p className="text-sm text-[#EF233C] text-center py-6">{screenshotError}</p>
+            ) : screenshotBlobUrl ? (
+              <img
+                src={screenshotBlobUrl}
+                alt="Capture de paiement"
+                className="max-h-[70vh] mx-auto rounded-2xl object-contain"
+              />
+            ) : (
+              <p className="text-sm text-slate-500 text-center py-10">
+                Chargement sécurisé de la capture...
+              </p>
+            )}
           </div>
         </div>
       )}

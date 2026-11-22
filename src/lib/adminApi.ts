@@ -1,8 +1,10 @@
 import { auth } from './firebase';
 import {
   ORDER_STATUS_META,
+  type AdminClientAccountSummary,
   type AdminUser,
   type AuditLog,
+  type ClientAccountPublic,
   type ClientProfile,
   type Order,
   type OrderStatus,
@@ -48,12 +50,8 @@ export function clearStaffSessionToken() {
   setStaffSessionToken(null);
 }
 
-async function adminFetch<T>(url: string, init: RequestInit = {}): Promise<T> {
-  const headers = new Headers(init.headers || {});
-  if (!headers.has('Content-Type') && init.body) {
-    headers.set('Content-Type', 'application/json');
-  }
-
+export async function getStaffAuthHeaders(extra?: HeadersInit): Promise<Headers> {
+  const headers = new Headers(extra || {});
   const staffToken = getStaffSessionToken();
   if (staffToken) {
     headers.set('X-Staff-Session', staffToken);
@@ -70,6 +68,42 @@ async function adminFetch<T>(url: string, init: RequestInit = {}): Promise<T> {
       }
     }
   }
+  return headers;
+}
+
+export async function fetchStaffProtectedBlobUrl(url: string): Promise<string> {
+  const headers = await getStaffAuthHeaders();
+  const res = await fetch(url, {
+    headers,
+    credentials: 'include',
+  });
+  if (!res.ok) {
+    throw new Error(`Impossible de charger ce fichier (${res.status}).`);
+  }
+  const blob = await res.blob();
+  return URL.createObjectURL(blob);
+}
+
+export async function triggerStaffProtectedDownload(
+  url: string,
+  filename: string
+): Promise<void> {
+  const objectUrl = await fetchStaffProtectedBlobUrl(url);
+  const a = document.createElement('a');
+  a.href = objectUrl;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(objectUrl), 10000);
+}
+
+async function adminFetch<T>(url: string, init: RequestInit = {}): Promise<T> {
+  const headers = await getStaffAuthHeaders(init.headers);
+  if (!headers.has('Content-Type') && init.body) {
+    headers.set('Content-Type', 'application/json');
+  }
+  const staffToken = getStaffSessionToken();
 
   const method = (init.method || 'GET').toUpperCase();
   const maxAttempts = method === 'GET' ? 3 : 1;
@@ -268,7 +302,7 @@ export async function fetchServerAuditLogsByRange(
 
 export async function createManualOrderServer(
   payload: Record<string, unknown>
-): Promise<{ orderId: string; orderNumber: string }> {
+): Promise<{ orderId: string; orderNumber: string; order?: Order }> {
   return adminFetch('/api/admin/orders', {
     method: 'POST',
     body: JSON.stringify(payload),
@@ -363,3 +397,38 @@ export async function saveShopSettingsServer(
     body: JSON.stringify(settings),
   });
 }
+
+export async function fetchAdminClientAccounts(): Promise<AdminClientAccountSummary[]> {
+  const res = await adminFetch<{ accounts?: AdminClientAccountSummary[] }>(
+    '/api/admin/client-accounts'
+  );
+  return Array.isArray(res?.accounts) ? res.accounts : [];
+}
+
+export async function resetClientAccountPasswordServer(
+  accountId: string,
+  newPassword?: string
+): Promise<{ temporaryPassword: string; account: ClientAccountPublic }> {
+  return adminFetch<{ temporaryPassword: string; account: ClientAccountPublic }>(
+    `/api/admin/client-accounts/${encodeURIComponent(accountId)}/reset-password`,
+    {
+      method: 'POST',
+      body: JSON.stringify(newPassword ? { newPassword } : {}),
+    }
+  );
+}
+
+export async function toggleClientAccountActiveServer(
+  accountId: string,
+  active: boolean
+): Promise<ClientAccountPublic> {
+  const res = await adminFetch<{ account: ClientAccountPublic }>(
+    `/api/admin/client-accounts/${encodeURIComponent(accountId)}`,
+    {
+      method: 'PATCH',
+      body: JSON.stringify({ active }),
+    }
+  );
+  return res.account;
+}
+

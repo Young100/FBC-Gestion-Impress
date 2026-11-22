@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   AlertTriangle,
   Archive,
@@ -6,11 +6,15 @@ import {
   Download,
   Eye,
   FileWarning,
+  Loader2,
   MessageCircle,
   Save,
   X,
 } from 'lucide-react';
 import {
+  fetchStaffProtectedBlobUrl,
+  getStaffAuthHeaders,
+  triggerStaffProtectedDownload,
   updateOrderFieldsServer,
   updateOrderStatusServer,
 } from '../lib/adminApi';
@@ -78,8 +82,50 @@ export const AdminOrderDetailModal: React.FC<AdminOrderDetailModalProps> = ({
     name: string;
     ext: string;
   } | null>(null);
+  const [previewBlobUrl, setPreviewBlobUrl] = useState<string | null>(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
+  const [previewError, setPreviewError] = useState<string | null>(null);
+  const [downloadingFileId, setDownloadingFileId] = useState<string | null>(null);
   const [zipLoading, setZipLoading] = useState(false);
   const [zipError, setZipError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!previewFile) {
+      setPreviewBlobUrl(null);
+      setPreviewError(null);
+      return;
+    }
+    let active = true;
+    let createdUrl: string | null = null;
+    setPreviewLoading(true);
+    setPreviewError(null);
+    setPreviewBlobUrl(null);
+
+    fetchStaffProtectedBlobUrl(`/api/files/${previewFile.fileId}/preview`)
+      .then((url) => {
+        if (!active) {
+          URL.revokeObjectURL(url);
+          return;
+        }
+        createdUrl = url;
+        setPreviewBlobUrl(url);
+      })
+      .catch((err) => {
+        if (active) {
+          setPreviewError(
+            err instanceof Error ? err.message : 'Aperçu indisponible.'
+          );
+        }
+      })
+      .finally(() => {
+        if (active) setPreviewLoading(false);
+      });
+
+    return () => {
+      active = false;
+      if (createdUrl) URL.revokeObjectURL(createdUrl);
+    };
+  }, [previewFile]);
 
   const isAdmin = staffUser.role === 'admin';
   const useServerApi = staffUser.authMethod === 'credentials';
@@ -178,9 +224,13 @@ export const AdminOrderDetailModal: React.FC<AdminOrderDetailModalProps> = ({
     setZipLoading(true);
     setZipError(null);
     try {
+      const headers = await getStaffAuthHeaders({
+        'Content-Type': 'application/json',
+      });
       const res = await fetch(`/api/orders/${order.orderId}/files-zip`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers,
+        credentials: 'include',
         body: JSON.stringify({
           orderNumber: order.orderNumber,
           files: activeFiles.map((f) => ({
@@ -202,7 +252,7 @@ export const AdminOrderDetailModal: React.FC<AdminOrderDetailModalProps> = ({
       document.body.appendChild(a);
       a.click();
       a.remove();
-      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      setTimeout(() => URL.revokeObjectURL(url), 10000);
     } catch (err) {
       setZipError(
         err instanceof Error ? err.message : 'Erreur lors du téléchargement ZIP.'
@@ -213,23 +263,23 @@ export const AdminOrderDetailModal: React.FC<AdminOrderDetailModalProps> = ({
   };
 
   const whatsappClean = order.customerPhone.replace(/\D/g, '');
-  const trackingLink = `${window.location.origin}/client/?track=${encodeURIComponent(order.orderId)}`;
+  const trackingLink = `${window.location.origin}/client/?code=${encodeURIComponent(order.trackingCode)}`;
   const messageTemplates = [
     {
       label: 'Commande reçue',
-      text: `Bonjour ${order.customerName}, nous avons bien reçu votre commande ${order.orderNumber}. Suivi en ligne : ${trackingLink}`,
+      text: `Bonjour ${order.customerName}, nous avons bien reçu votre commande ${order.orderNumber}. Connectez-vous à votre espace client FBC Print pour la suivre (code : ${order.trackingCode}) : ${trackingLink}`,
     },
     {
       label: 'Fichier à corriger',
-      text: `Bonjour ${order.customerName}, concernant la commande ${order.orderNumber}, un fichier nécessite une correction : ${order.correctionRequestMessage || 'merci de vérifier votre page de suivi'} (${trackingLink}).`,
+      text: `Bonjour ${order.customerName}, concernant votre commande ${order.orderNumber}, un fichier nécessite une correction : ${order.correctionRequestMessage || 'merci de vérifier votre espace client'}. Connectez-vous à votre compte client FBC Print pour renvoyer le fichier (code : ${order.trackingCode}) : ${trackingLink}`,
     },
     {
       label: 'Paiement validé',
-      text: `Bonjour ${order.customerName}, votre paiement pour la commande ${order.orderNumber} est validé ! Votre reçu PDF est disponible ici : ${trackingLink}`,
+      text: `Bonjour ${order.customerName}, votre paiement pour la commande ${order.orderNumber} est validé ! Connectez-vous à votre espace client FBC Print pour télécharger votre reçu PDF (code : ${order.trackingCode}) : ${trackingLink}`,
     },
     {
       label: 'Commande prête',
-      text: `Bonjour ${order.customerName}, bonne nouvelle ! Votre commande ${order.orderNumber} est prête chez FBC Print. Suivi : ${trackingLink}`,
+      text: `Bonjour ${order.customerName}, bonne nouvelle ! Votre commande ${order.orderNumber} est prête chez FBC Print. Code de suivi : ${order.trackingCode} — ${trackingLink}`,
     },
     {
       label: 'Commande livrée',
@@ -594,13 +644,36 @@ export const AdminOrderDetailModal: React.FC<AdminOrderDetailModalProps> = ({
                     </span>
                   )}
 
-                  <a
-                    href={`/api/files/${file.fileId}/download`}
-                    className="inline-flex items-center gap-1.5 px-4 py-2 rounded-full bg-[#119DA4] text-white text-xs font-semibold hover:bg-[#0e848a] min-h-[40px]"
+                  <button
+                    type="button"
+                    disabled={downloadingFileId === file.fileId}
+                    onClick={async () => {
+                      setDownloadingFileId(file.fileId);
+                      setActionError(null);
+                      try {
+                        await triggerStaffProtectedDownload(
+                          `/api/files/${file.fileId}/download`,
+                          file.originalName
+                        );
+                      } catch (err) {
+                        setActionError(
+                          err instanceof Error
+                            ? err.message
+                            : 'Impossible de télécharger ce fichier.'
+                        );
+                      } finally {
+                        setDownloadingFileId(null);
+                      }
+                    }}
+                    className="inline-flex items-center gap-1.5 px-4 py-2 rounded-full bg-[#119DA4] text-white text-xs font-semibold hover:bg-[#0e848a] min-h-[40px] disabled:opacity-60"
                   >
-                    <Download className="w-3.5 h-3.5" />
+                    {downloadingFileId === file.fileId ? (
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    ) : (
+                      <Download className="w-3.5 h-3.5" />
+                    )}
                     Original
-                  </a>
+                  </button>
                 </div>
               </div>
             ))}
@@ -664,19 +737,30 @@ export const AdminOrderDetailModal: React.FC<AdminOrderDetailModalProps> = ({
                 <X className="w-5 h-5" />
               </button>
             </div>
-            {previewFile.ext === '.pdf' ? (
-              <iframe
-                src={`/api/files/${previewFile.fileId}/preview`}
-                title={previewFile.name}
-                className="w-full h-[70vh] rounded-2xl border border-slate-200"
-              />
-            ) : (
-              <img
-                src={`/api/files/${previewFile.fileId}/preview`}
-                alt={previewFile.name}
-                className="max-h-[70vh] mx-auto rounded-2xl object-contain"
-              />
-            )}
+            {previewLoading ? (
+              <div className="py-16 text-center space-y-2 text-slate-600">
+                <Loader2 className="w-8 h-8 animate-spin text-[#119DA4] mx-auto" />
+                <p className="text-sm">Chargement sécurisé de l’aperçu...</p>
+              </div>
+            ) : previewError ? (
+              <p className="text-sm text-[#EF233C] bg-[#EF233C]/10 px-4 py-3 rounded-2xl text-center">
+                {previewError}
+              </p>
+            ) : previewBlobUrl ? (
+              previewFile.ext === '.pdf' ? (
+                <iframe
+                  src={previewBlobUrl}
+                  title={previewFile.name}
+                  className="w-full h-[70vh] rounded-2xl border border-slate-200"
+                />
+              ) : (
+                <img
+                  src={previewBlobUrl}
+                  alt={previewFile.name}
+                  className="max-h-[70vh] mx-auto rounded-2xl object-contain"
+                />
+              )
+            ) : null}
           </div>
         </div>
       )}

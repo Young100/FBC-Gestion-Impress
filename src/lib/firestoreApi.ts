@@ -73,10 +73,10 @@ function sanitizeForFirestore<T>(value: T): T {
   return value;
 }
 
-export function buildLookupKey(orderNumber: string, phone: string): string {
-  const cleanOrder = orderNumber.trim().toUpperCase().replace(/[^A-Z0-9-]/g, '');
+export function buildLookupKey(trackingCode: string, phone: string): string {
+  const cleanCode = trackingCode.trim().toUpperCase().replace(/[^A-Z0-9-]/g, '');
   const { compact } = normalizeBurkinaPhone(phone);
-  return `${cleanOrder}_${compact}`;
+  return `${cleanCode}_${compact}`;
 }
 
 export function expandLegacyHabitsService(services: PrintService[]): PrintService[] {
@@ -343,7 +343,7 @@ export async function createOrderInFirestore(
     updatedAt: serverTimestamp(),
   };
 
-  const lookupKey = buildLookupKey(orderNumber, payload.customerPhone);
+  const lookupKey = buildLookupKey(trackingCode, payload.customerPhone);
 
   const cleanOrderDoc = sanitizeForFirestore(orderDoc);
 
@@ -366,19 +366,58 @@ export async function createOrderInFirestore(
   }
 }
 
-export async function findOrderByNumberAndPhone(
-  orderNumber: string,
+export async function findOrderByTrackingCodeAndPhone(
+  trackingCode: string,
   phone: string
 ): Promise<Order | null> {
-  const lookupKey = buildLookupKey(orderNumber, phone);
+  const cleanCode = trackingCode.trim().toUpperCase().replace(/[^A-Z0-9-]/g, '');
+  const phoneCheck = normalizeBurkinaPhone(phone);
+  if (!cleanCode || !phoneCheck.valid) {
+    return null;
+  }
+
+  const lookupKey = buildLookupKey(cleanCode, phone);
   try {
     const lookupSnap = await getDoc(doc(db, 'order_lookups', lookupKey));
-    if (!lookupSnap.exists()) return null;
-    const { orderId } = lookupSnap.data() as { orderId: string };
-    const orderSnap = await getDoc(doc(db, 'orders', orderId));
-    return orderSnap.exists() ? (orderSnap.data() as Order) : null;
-  } catch (error) {
-    handleFirestoreError(error, OperationType.GET, `order_lookups/${lookupKey}`);
+    if (lookupSnap.exists()) {
+      const { orderId } = lookupSnap.data() as { orderId: string };
+      const orderSnap = await getDoc(doc(db, 'orders', orderId));
+      if (orderSnap.exists()) {
+        const order = orderSnap.data() as Order;
+        const storedPhone = normalizeBurkinaPhone(order.customerPhone);
+        if (
+          order.trackingCode.trim().toUpperCase() === cleanCode &&
+          storedPhone.compact === phoneCheck.compact
+        ) {
+          return order;
+        }
+      }
+    }
+  } catch (err) {
+    console.warn('Direct order_lookups fetch fallback to server:', err);
+  }
+
+  // Fallback to server lookup for orders created before trackingCode lookup indexing
+  try {
+    const res = await fetch('/api/orders/lookup', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ trackingCode: cleanCode, phone }),
+    });
+    if (res.status === 429) {
+      const data = (await res.json().catch(() => ({}))) as { error?: string };
+      throw new Error(
+        data.error || 'Trop de tentatives. Veuillez patienter quelques minutes.'
+      );
+    }
+    if (!res.ok) return null;
+    const data = (await res.json()) as { order?: Order };
+    return data.order || null;
+  } catch (err) {
+    if (err instanceof Error && err.message.includes('Trop de tentatives')) {
+      throw err;
+    }
+    return null;
   }
 }
 

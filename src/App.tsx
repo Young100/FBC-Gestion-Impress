@@ -1,11 +1,12 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { DEFAULT_PAYMENT_METHODS, DEFAULT_SERVICES, DEFAULT_SETTINGS } from './data/defaults';
 import {
-  fetchOrderById,
-  findOrderByNumberAndPhone,
-  subscribePublicCatalog,
-  subscribeSingleOrder,
-} from './lib/firestoreApi';
+  ClientApiError,
+  fetchClientSession,
+  fetchMyOrders,
+  openOrderByTrackingCode,
+} from './lib/clientApi';
+import { subscribePublicCatalog } from './lib/firestoreApi';
 import {
   buildOrderChangeToasts,
   extractOrderSnapshot,
@@ -21,7 +22,15 @@ import {
   isBrowserNotifEnabled,
   playNotificationChime,
 } from './lib/browserNotifications';
-import type { Order, PaymentMethod, PrintService, ShopSettings } from './types/fbc';
+import type {
+  ClientAccountPublic,
+  Order,
+  PaymentMethod,
+  PrintService,
+  ShopSettings,
+} from './types/fbc';
+import { ClientAuthPanel } from './components/ClientAuthPanel';
+import { ClientOrdersDashboard } from './components/ClientOrdersDashboard';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { Header, type AppView } from './components/Header';
 import { LandingHero } from './components/LandingHero';
@@ -29,28 +38,6 @@ import { OfflineIndicator } from './components/OfflineIndicator';
 import { OrderTrackingView } from './components/OrderTrackingView';
 import { OrderWizard } from './components/OrderWizard';
 import { ToastProvider, useToast } from './components/ToastProvider';
-
-const TRACKED_ORDER_STORAGE_KEY = 'fbc_tracked_order_id';
-
-function saveTrackedOrderId(orderId: string | null) {
-  try {
-    if (orderId) {
-      window.localStorage.setItem(TRACKED_ORDER_STORAGE_KEY, orderId);
-    } else {
-      window.localStorage.removeItem(TRACKED_ORDER_STORAGE_KEY);
-    }
-  } catch {
-    // Ignore storage unavailability (e.g. private browsing restrictions)
-  }
-}
-
-function readSavedTrackedOrderId(): string | null {
-  try {
-    return window.localStorage.getItem(TRACKED_ORDER_STORAGE_KEY);
-  } catch {
-    return null;
-  }
-}
 
 function AppContent() {
   const { showToast } = useToast();
@@ -60,16 +47,25 @@ function AppContent() {
   const [paymentMethods, setPaymentMethods] =
     useState<PaymentMethod[]>(DEFAULT_PAYMENT_METHODS);
 
+  const [clientAccount, setClientAccount] = useState<ClientAccountPublic | null>(null);
+  const [myOrders, setMyOrders] = useState<Order[]>([]);
+  const [loadingOrders, setLoadingOrders] = useState(false);
+  const [sessionBootstrapped, setSessionBootstrapped] = useState(false);
+
   const [preselectedServiceId, setPreselectedServiceId] = useState<string | undefined>();
-  const [trackedOrderId, setTrackedOrderId] = useState<string | null>(null);
   const [trackedOrder, setTrackedOrder] = useState<Order | null>(null);
+  const [pendingTrackingCode, setPendingTrackingCode] = useState<string>('');
+  const [trackingSecurityNotice, setTrackingSecurityNotice] = useState<string | null>(null);
 
   const viewRef = useRef<AppView>(view);
   viewRef.current = view;
 
-  const prevOrderSnapshotRef = useRef<OrderSnapshotState | null>(null);
+  const trackedOrderIdRef = useRef<string | null>(null);
+  trackedOrderIdRef.current = trackedOrder?.orderId || null;
 
-  // Unlock WebAudio context on first user interaction so future live chimes play reliably
+  const prevOrderSnapshotsRef = useRef<Map<string, OrderSnapshotState>>(new Map());
+
+  // Unlock WebAudio context on first user interaction so live chimes play reliably
   useEffect(() => {
     return initAudioUnlock();
   }, []);
@@ -80,76 +76,171 @@ function AppContent() {
     return () => unsub();
   }, []);
 
-  // Support direct private tracking URL (?track=ord_...) or restore last tracked order quietly
-  useEffect(() => {
-    const params = new URLSearchParams(window.location.search);
-    const trackId = params.get('track');
-    const savedId = !trackId ? readSavedTrackedOrderId() : null;
-    const initialId = trackId || savedId;
-    if (!initialId) return;
+  const syncOrdersAndNotify = useCallback(
+    (ordersList: Order[], notifyChanges: boolean) => {
+      setMyOrders(ordersList);
 
-    fetchOrderById(initialId)
-      .then((ord) => {
-        if (ord) {
-          prevOrderSnapshotRef.current = extractOrderSnapshot(ord);
-          setTrackedOrderId(ord.orderId);
-          setTrackedOrder(ord);
-          saveTrackedOrderId(ord.orderId);
-          if (trackId) {
-            setView('track');
-          }
-        } else if (savedId) {
-          saveTrackedOrderId(null);
-        }
-      })
-      .catch(() => {
-        if (savedId) saveTrackedOrderId(null);
-      });
-  }, []);
-
-  // Live updates for the tracked order + real-time toast notifications on status changes
-  useEffect(() => {
-    if (!trackedOrderId) return;
-    const unsub = subscribeSingleOrder(trackedOrderId, (ord) => {
-      if (!ord) return;
-      setTrackedOrder(ord);
-
-      const prev = prevOrderSnapshotRef.current;
-      if (prev && prev.orderId === ord.orderId) {
-        const notifications = buildOrderChangeToasts(prev, ord, {
-          isOnTrackingView: viewRef.current === 'track',
-          onOpenTracking: () => {
-            setView('track');
-            window.scrollTo({ top: 0, behavior: 'smooth' });
-          },
-        });
-        for (const toast of notifications) {
-          showToast(toast);
-          if (isAudioChimeEnabled(CLIENT_SOUND_KEY)) {
-            playNotificationChime(toast.variant || 'info');
-          }
-          if (
-            isBrowserNotifEnabled(CLIENT_PREF_KEY) &&
-            getBrowserNotifPermission() === 'granted'
-          ) {
-            void dispatchNativeNotification({
-              title: `${ord.orderNumber} — ${toast.title}`,
-              body: toast.message,
-              tag: toast.id,
-              icon: '/pwa-192x192.png',
-              badge: '/pwa-192x192.png',
-              url: `/client/?track=${encodeURIComponent(ord.orderId)}`,
-              swScope: '/client/',
-              requireInteraction:
-                ord.status === 'fichier_a_corriger' || ord.status === 'prete',
-            });
-          }
+      const activeId = trackedOrderIdRef.current;
+      if (activeId) {
+        const refreshed = ordersList.find((o) => o.orderId === activeId);
+        if (refreshed) {
+          setTrackedOrder(refreshed);
         }
       }
-      prevOrderSnapshotRef.current = extractOrderSnapshot(ord);
-    });
-    return () => unsub();
-  }, [trackedOrderId, showToast]);
+
+      const prevMap = prevOrderSnapshotsRef.current;
+      const nextMap = new Map<string, OrderSnapshotState>();
+
+      for (const ord of ordersList) {
+        const prev = prevMap.get(ord.orderId);
+        if (notifyChanges && prev) {
+          const notifications = buildOrderChangeToasts(prev, ord, {
+            isOnTrackingView:
+              viewRef.current === 'track' && trackedOrderIdRef.current === ord.orderId,
+            onOpenTracking: () => {
+              setTrackedOrder(ord);
+              setPendingTrackingCode(ord.trackingCode);
+              setView('track');
+              window.scrollTo({ top: 0, behavior: 'smooth' });
+            },
+          });
+          for (const toast of notifications) {
+            showToast(toast);
+            if (isAudioChimeEnabled(CLIENT_SOUND_KEY)) {
+              playNotificationChime(toast.variant || 'info');
+            }
+            if (
+              isBrowserNotifEnabled(CLIENT_PREF_KEY) &&
+              getBrowserNotifPermission() === 'granted'
+            ) {
+              void dispatchNativeNotification({
+                title: `${ord.orderNumber} — ${toast.title}`,
+                body: toast.message,
+                tag: toast.id,
+                icon: '/pwa-192x192.png',
+                badge: '/pwa-192x192.png',
+                url: `/client/?code=${encodeURIComponent(ord.trackingCode)}`,
+                swScope: '/client/',
+                requireInteraction:
+                  ord.status === 'fichier_a_corriger' || ord.status === 'prete',
+              });
+            }
+          }
+        }
+        nextMap.set(ord.orderId, extractOrderSnapshot(ord));
+      }
+
+      prevOrderSnapshotsRef.current = nextMap;
+    },
+    [showToast]
+  );
+
+  const loadMyOrders = useCallback(
+    async (notifyChanges: boolean) => {
+      setLoadingOrders(true);
+      try {
+        const list = await fetchMyOrders();
+        syncOrdersAndNotify(list, notifyChanges);
+      } catch (err) {
+        if (err instanceof ClientApiError && err.status === 401) {
+          setClientAccount(null);
+          setMyOrders([]);
+          setTrackedOrder(null);
+          prevOrderSnapshotsRef.current.clear();
+        }
+      } finally {
+        setLoadingOrders(false);
+      }
+    },
+    [syncOrdersAndNotify]
+  );
+
+  // Bootstrap client session + enforce authentication on shared links (?code= / ?track=)
+  useEffect(() => {
+    let active = true;
+    const params = new URLSearchParams(window.location.search);
+    const codeParam = params.get('code')?.trim().toUpperCase() || '';
+    const legacyTrackParam = params.get('track')?.trim() || '';
+
+    if (legacyTrackParam) {
+      window.history.replaceState({}, '', '/client/');
+    }
+
+    (async () => {
+      try {
+        const session = await fetchClientSession();
+        if (!active) return;
+
+        if (session.authenticated && session.account) {
+          setClientAccount(session.account);
+          const list = await fetchMyOrders().catch(() => [] as Order[]);
+          if (!active) return;
+          syncOrdersAndNotify(list, false);
+
+          if (codeParam) {
+            setPendingTrackingCode(codeParam);
+            try {
+              const res = await openOrderByTrackingCode(codeParam);
+              if (!active) return;
+              setTrackedOrder(res.order);
+              setTrackingSecurityNotice(null);
+              setView('track');
+              if (!list.some((o) => o.orderId === res.order.orderId)) {
+                syncOrdersAndNotify([res.order, ...list], false);
+              }
+            } catch (err) {
+              if (!active) return;
+              setTrackedOrder(null);
+              setTrackingSecurityNotice(
+                err instanceof Error
+                  ? err.message
+                  : 'Accès refusé : cette commande appartient à un autre compte client.'
+              );
+              setView('track');
+            }
+          } else if (legacyTrackParam) {
+            setTrackedOrder(null);
+            setTrackingSecurityNotice(
+              'Saisissez votre code de suivi (ex : FBC-A7K9M2) pour consulter votre commande.'
+            );
+            setView('track');
+          }
+        } else {
+          setClientAccount(null);
+          setTrackedOrder(null);
+          if (codeParam) {
+            setPendingTrackingCode(codeParam);
+            setTrackingSecurityNotice(
+              `Connectez-vous ou créez votre compte client pour consulter la commande ${codeParam} en toute confidentialité.`
+            );
+            setView('track');
+          } else if (legacyTrackParam) {
+            setTrackingSecurityNotice(
+              'Par mesure de sécurité, connectez-vous à votre compte client puis saisissez votre code de suivi (FBC-...).'
+            );
+            setView('track');
+          }
+        }
+      } catch {
+        // Ignore startup probe errors
+      } finally {
+        if (active) setSessionBootstrapped(true);
+      }
+    })();
+
+    return () => {
+      active = false;
+    };
+  }, [syncOrdersAndNotify]);
+
+  // Poll authenticated client orders every 8s for live status & payment notifications
+  useEffect(() => {
+    if (!clientAccount || !sessionBootstrapped) return;
+    const interval = window.setInterval(() => {
+      void loadMyOrders(true);
+    }, 8000);
+    return () => window.clearInterval(interval);
+  }, [clientAccount, sessionBootstrapped, loadMyOrders]);
 
   const handleStartOrder = (serviceId?: string) => {
     setPreselectedServiceId(serviceId);
@@ -157,50 +248,149 @@ function AppContent() {
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
-  const handleTrackLookup = async (
-    orderNumber: string,
-    phone: string
-  ): Promise<string | null> => {
-    try {
-      const found = await findOrderByNumberAndPhone(orderNumber, phone);
-      if (!found) {
-        return 'Aucune commande trouvée avec ce numéro de commande et ce téléphone.';
-      }
-      prevOrderSnapshotRef.current = extractOrderSnapshot(found);
-      setTrackedOrderId(found.orderId);
-      setTrackedOrder(found);
-      saveTrackedOrderId(found.orderId);
+  const handleOrderUpdated = useCallback((updated: Order) => {
+    setTrackedOrder((prev) =>
+      prev && prev.orderId === updated.orderId ? updated : prev
+    );
+    setMyOrders((prev) => {
+      const exists = prev.some((o) => o.orderId === updated.orderId);
+      return exists
+        ? prev.map((o) => (o.orderId === updated.orderId ? updated : o))
+        : [updated, ...prev];
+    });
+    prevOrderSnapshotsRef.current.set(updated.orderId, extractOrderSnapshot(updated));
+  }, []);
+
+  const handleOpenCode = async (trackingCode: string): Promise<string | null> => {
+    const cleanCode = trackingCode.trim().toUpperCase();
+    if (cleanCode.startsWith('CMD-')) {
+      return 'Le suivi s’effectue avec votre code de suivi (ex : FBC-A7K9M2) et non avec le numéro de commande.';
+    }
+    if (!clientAccount) {
+      setPendingTrackingCode(cleanCode);
+      setTrackedOrder(null);
+      setTrackingSecurityNotice(
+        `Connectez-vous à votre compte client ou créez votre compte pour consulter la commande ${cleanCode} en toute confidentialité.`
+      );
       setView('track');
       window.scrollTo({ top: 0, behavior: 'smooth' });
       return null;
-    } catch {
-      return 'Impossible de vérifier cette commande. Vérifiez le format du numéro.';
+    }
+
+    try {
+      const res = await openOrderByTrackingCode(cleanCode);
+      handleOrderUpdated(res.order);
+      setTrackedOrder(res.order);
+      setPendingTrackingCode(res.order.trackingCode);
+      setTrackingSecurityNotice(null);
+      setView('track');
+      window.history.replaceState(
+        {},
+        '',
+        `/client/?code=${encodeURIComponent(res.order.trackingCode)}`
+      );
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+      return null;
+    } catch (err) {
+      if (err instanceof ClientApiError && err.status === 401) {
+        setClientAccount(null);
+        setTrackedOrder(null);
+        setPendingTrackingCode(cleanCode);
+        setTrackingSecurityNotice(err.message);
+        setView('track');
+      }
+      return err instanceof Error
+        ? err.message
+        : 'Impossible d’ouvrir cette commande avec votre compte.';
+    }
+  };
+
+  const handleClientAuthenticated = async (
+    account: ClientAccountPublic,
+    claimedOrder?: Order
+  ) => {
+    setClientAccount(account);
+    const list = await fetchMyOrders().catch(() => [] as Order[]);
+    const combined =
+      claimedOrder && !list.some((o) => o.orderId === claimedOrder.orderId)
+        ? [claimedOrder, ...list]
+        : list;
+    syncOrdersAndNotify(combined, false);
+
+    if (claimedOrder) {
+      setTrackedOrder(claimedOrder);
+      setPendingTrackingCode(claimedOrder.trackingCode);
+      setTrackingSecurityNotice(null);
+      setView('track');
+      window.history.replaceState(
+        {},
+        '',
+        `/client/?code=${encodeURIComponent(claimedOrder.trackingCode)}`
+      );
+      return;
+    }
+
+    if (pendingTrackingCode) {
+      try {
+        const res = await openOrderByTrackingCode(pendingTrackingCode);
+        handleOrderUpdated(res.order);
+        setTrackedOrder(res.order);
+        setTrackingSecurityNotice(null);
+        setView('track');
+        window.history.replaceState(
+          {},
+          '',
+          `/client/?code=${encodeURIComponent(res.order.trackingCode)}`
+        );
+      } catch (err) {
+        setTrackedOrder(null);
+        setTrackingSecurityNotice(
+          err instanceof Error
+            ? err.message
+            : 'Cette commande appartient à un autre compte client.'
+        );
+        setView('track');
+      }
     }
   };
 
   const handleOrderCreatedAndTrack = (order: Order) => {
-    prevOrderSnapshotRef.current = extractOrderSnapshot(order);
-    setTrackedOrderId(order.orderId);
+    handleOrderUpdated(order);
     setTrackedOrder(order);
-    saveTrackedOrderId(order.orderId);
+    setTrackingSecurityNotice(null);
+    setPendingTrackingCode(order.trackingCode);
     setView('track');
-    window.history.replaceState({}, '', `/client/?track=${encodeURIComponent(order.orderId)}`);
+    window.history.replaceState(
+      {},
+      '',
+      `/client/?code=${encodeURIComponent(order.trackingCode)}`
+    );
     window.scrollTo({ top: 0, behavior: 'smooth' });
     showToast({
       id: `order_created_${order.orderId}`,
       badge: order.orderNumber,
       title: 'Commande enregistrée !',
-      message:
-        'Vous recevrez ici des notifications en temps réel à chaque changement de statut.',
+      message: `Conservez votre code de suivi ${order.trackingCode}. Vous recevrez les notifications en temps réel dans votre espace client.`,
       variant: 'success',
-      durationMs: 7000,
+      durationMs: 7500,
     });
+  };
+
+  const handleLoggedOut = () => {
+    setClientAccount(null);
+    setMyOrders([]);
+    setTrackedOrder(null);
+    setPendingTrackingCode('');
+    setTrackingSecurityNotice(null);
+    prevOrderSnapshotsRef.current.clear();
+    window.history.replaceState({}, '', '/client/');
   };
 
   return (
     <div className="min-h-screen flex flex-col bg-[#EDF2F4] text-black">
       <Header
         currentView={view}
+        clientAccount={clientAccount}
         onNavigate={(v) => {
           setView(v);
           window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -215,8 +405,13 @@ function AppContent() {
           <LandingHero
             services={services}
             settings={settings}
+            clientAccount={clientAccount}
             onStartOrder={handleStartOrder}
-            onTrackLookup={handleTrackLookup}
+            onQuickTrackCode={handleOpenCode}
+            onGoToAccount={() => {
+              setView('account');
+              window.scrollTo({ top: 0, behavior: 'smooth' });
+            }}
           />
         )}
 
@@ -225,8 +420,13 @@ function AppContent() {
             services={services}
             paymentMethods={paymentMethods}
             settings={settings}
+            clientAccount={clientAccount}
             preselectedServiceId={preselectedServiceId}
+            onClientAuthenticated={(acc, claimed) => {
+              void handleClientAuthenticated(acc, claimed);
+            }}
             onOrderCreatedAndTrack={handleOrderCreatedAndTrack}
+            onOrderUpdated={handleOrderUpdated}
             onBackHome={() => setView('home')}
           />
         )}
@@ -234,17 +434,72 @@ function AppContent() {
         {view === 'track' && (
           <OrderTrackingView
             order={trackedOrder}
+            clientAccount={clientAccount}
             settings={settings}
             paymentMethods={paymentMethods}
-            onLookup={handleTrackLookup}
-            onResetOrder={() => {
-              prevOrderSnapshotRef.current = null;
-              setTrackedOrderId(null);
+            initialTrackingCode={pendingTrackingCode}
+            securityNotice={trackingSecurityNotice}
+            onAuthenticated={(acc, claimed) => {
+              void handleClientAuthenticated(acc, claimed);
+            }}
+            onOpenCode={handleOpenCode}
+            onOrderUpdated={handleOrderUpdated}
+            onBackToOrders={() => {
               setTrackedOrder(null);
-              saveTrackedOrderId(null);
+              setPendingTrackingCode('');
+              setTrackingSecurityNotice(null);
               window.history.replaceState({}, '', '/client/');
+              setView('account');
+              window.scrollTo({ top: 0, behavior: 'smooth' });
             }}
           />
+        )}
+
+        {view === 'account' && (
+          clientAccount ? (
+            <ClientOrdersDashboard
+              account={clientAccount}
+              orders={myOrders}
+              loading={loadingOrders}
+              onRefresh={() => loadMyOrders(false)}
+              onOpenOrder={(ord) => {
+                setTrackedOrder(ord);
+                setPendingTrackingCode(ord.trackingCode);
+                setTrackingSecurityNotice(null);
+                setView('track');
+                window.history.replaceState(
+                  {},
+                  '',
+                  `/client/?code=${encodeURIComponent(ord.trackingCode)}`
+                );
+                window.scrollTo({ top: 0, behavior: 'smooth' });
+              }}
+              onOrderClaimed={(ord) => {
+                handleOrderUpdated(ord);
+                setTrackedOrder(ord);
+                setPendingTrackingCode(ord.trackingCode);
+                setView('track');
+                window.history.replaceState(
+                  {},
+                  '',
+                  `/client/?code=${encodeURIComponent(ord.trackingCode)}`
+                );
+              }}
+              onStartOrder={() => handleStartOrder()}
+              onAccountUpdated={(updatedAcc) => setClientAccount(updatedAcc)}
+              onLoggedOut={handleLoggedOut}
+            />
+          ) : (
+            <div className="max-w-xl mx-auto px-4 py-10 sm:py-12">
+              <ClientAuthPanel
+                initialMode="login"
+                shopWhatsapp={settings.whatsapp}
+                onAuthenticated={(acc, claimed) => {
+                  void handleClientAuthenticated(acc, claimed);
+                }}
+              />
+            </div>
+          )
         )}
       </main>
     </div>

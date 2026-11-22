@@ -1,3 +1,5 @@
+import { getStaffAuthHeaders } from './adminApi';
+import { getClientSessionToken } from './clientApi';
 import type { UploadedFileMeta } from '../types/fbc';
 
 export interface UploadProgressState {
@@ -40,9 +42,24 @@ export function startResumableUpload(
     slotKey: string;
     slotLabel: string;
     version?: number;
+    purpose?: 'order_file' | 'payment_proof' | 'service_image';
+    authMode?: 'client' | 'staff';
   },
   onProgress: (state: UploadProgressState) => void
 ): { promise: Promise<UploadedFileMeta>; controller: ResumableUploadController } {
+  const useStaffAuth = params.authMode === 'staff' || params.purpose === 'service_image';
+
+  const buildAuthHeaders = async (extra?: Record<string, string>): Promise<Headers> => {
+    if (useStaffAuth) {
+      return getStaffAuthHeaders(extra);
+    }
+    const headers = new Headers(extra || {});
+    const clientToken = getClientSessionToken();
+    if (clientToken) {
+      headers.set('X-Client-Session', clientToken);
+    }
+    return headers;
+  };
   const localId = `up_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
   let isPaused = false;
   let isCancelled = false;
@@ -101,13 +118,16 @@ export function startResumableUpload(
     const clientSha256 = await computeSha256Hex(file);
 
     // 1. Initialize server upload session
+    const initHeaders = await buildAuthHeaders({ 'Content-Type': 'application/json' });
     const initRes = await fetch('/api/uploads/init', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: initHeaders,
+      credentials: 'include',
       body: JSON.stringify({
         fileName: file.name,
         totalSize: file.size,
         mimeType: file.type || 'application/octet-stream',
+        purpose: params.purpose || 'order_file',
       }),
     });
 
@@ -142,12 +162,14 @@ export function startResumableUpload(
       activeAbort = new AbortController();
 
       try {
+        const chunkHeaders = await buildAuthHeaders({
+          'Content-Type': 'application/octet-stream',
+          'x-chunk-offset': String(offset),
+        });
         const putRes = await fetch(`/api/uploads/${fileId}/chunk`, {
           method: 'PUT',
-          headers: {
-            'Content-Type': 'application/octet-stream',
-            'x-chunk-offset': String(offset),
-          },
+          headers: chunkHeaders,
+          credentials: 'include',
           body: chunkBlob,
           signal: activeAbort.signal,
         });
@@ -197,7 +219,11 @@ export function startResumableUpload(
         // Check server offset in case chunk succeeded before disconnect, then wait before retry
         await new Promise((r) => setTimeout(r, Math.min(4000, 600 * retries)));
         try {
-          const statusRes = await fetch(`/api/uploads/${fileId}/status`);
+          const statusHeaders = await buildAuthHeaders();
+          const statusRes = await fetch(`/api/uploads/${fileId}/status`, {
+            headers: statusHeaders,
+            credentials: 'include',
+          });
           if (statusRes.ok) {
             const st = await statusRes.json();
             if (typeof st.uploadedBytes === 'number' && st.uploadedBytes > offset) {
@@ -212,9 +238,11 @@ export function startResumableUpload(
     }
 
     // 2. Complete & verify SHA-256 integrity
+    const completeHeaders = await buildAuthHeaders({ 'Content-Type': 'application/json' });
     const completeRes = await fetch(`/api/uploads/${fileId}/complete`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: completeHeaders,
+      credentials: 'include',
       body: JSON.stringify({ clientSha256 }),
     });
 

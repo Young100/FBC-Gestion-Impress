@@ -26,11 +26,14 @@ import {
   createStaffAccess,
   deleteServiceServer,
   deleteStaffAccess,
+  fetchAdminClientAccounts,
   fetchServerAuditLogsByRange,
   listStaffAccess,
+  resetClientAccountPasswordServer,
   saveClientNotesServer,
   saveServiceServer,
   saveShopSettingsServer,
+  toggleClientAccountActiveServer,
   updateGoogleStaffStatus,
   updateStaffAccess,
 } from '../lib/adminApi';
@@ -45,6 +48,7 @@ import { formatFcfa, isApparelSlug } from '../lib/pricing';
 import { startResumableUpload } from '../lib/uploadClient';
 import {
   ORDER_STATUS_META,
+  type AdminClientAccountSummary,
   type AdminUser,
   type AuditLog,
   type ClientProfile,
@@ -129,6 +133,8 @@ export const AdminSettingsTabs: React.FC<AdminSettingsTabsProps> = ({
           itemId: `service_img_${Date.now()}`,
           slotKey: 'service_thumbnail',
           slotLabel: 'Image prestation',
+          purpose: 'service_image',
+          authMode: 'staff',
         },
         () => {}
       );
@@ -148,9 +154,38 @@ export const AdminSettingsTabs: React.FC<AdminSettingsTabsProps> = ({
     }
   };
 
-  // --- Clients state ---
+  // --- Clients & Client Accounts state ---
   const [clientSearch, setClientSearch] = useState('');
   const [noteDrafts, setNoteDrafts] = useState<Record<string, string>>({});
+  const [clientAccounts, setClientAccounts] = useState<AdminClientAccountSummary[]>([]);
+  const [clientAccountsLoading, setClientAccountsLoading] = useState(false);
+  const [clientAccountsError, setClientAccountsError] = useState<string | null>(null);
+  const [tempPasswordsMap, setTempPasswordsMap] = useState<Record<string, string>>({});
+  const [clientAccountBusyId, setClientAccountBusyId] = useState<string | null>(null);
+  const [copiedAccountPwdId, setCopiedAccountPwdId] = useState<string | null>(null);
+
+  const loadClientAccounts = useCallback(async () => {
+    setClientAccountsLoading(true);
+    setClientAccountsError(null);
+    try {
+      const list = await fetchAdminClientAccounts();
+      setClientAccounts(list);
+    } catch (err) {
+      setClientAccountsError(
+        err instanceof Error
+          ? err.message
+          : 'Impossible de charger les comptes clients inscrits.'
+      );
+    } finally {
+      setClientAccountsLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (activeTab === 'clients') {
+      void loadClientAccounts();
+    }
+  }, [activeTab, loadClientAccounts]);
 
   // --- Settings & Server-Side Staff Access state ---
   const [settingsDraft, setSettingsDraft] = useState<ShopSettings>(settings);
@@ -1011,91 +1046,286 @@ export const AdminSettingsTabs: React.FC<AdminSettingsTabsProps> = ({
   }
 
   if (activeTab === 'clients') {
+    const searchLower = clientSearch.toLowerCase();
     const filteredClients = safeClients.filter(
       (c) =>
-        (c.name || '').toLowerCase().includes(clientSearch.toLowerCase()) ||
+        (c.name || '').toLowerCase().includes(searchLower) ||
         (c.phone || '').includes(clientSearch)
     );
-    return (
-      <div className="bg-white rounded-3xl p-6 border border-slate-200 shadow-sm space-y-5">
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-          <h2 className="font-display text-xl text-[#26547C]">
-            Répertoire clients ({safeClients.length})
-          </h2>
-          <input
-            type="search"
-            value={clientSearch}
-            onChange={(e) => setClientSearch(e.target.value)}
-            placeholder="Rechercher par nom ou téléphone..."
-            className="px-4 py-2.5 rounded-full bg-[#EDF2F4] text-sm min-w-[260px]"
-          />
-        </div>
+    const filteredAccounts = clientAccounts.filter(
+      (a) =>
+        a.username.toLowerCase().includes(searchLower) ||
+        a.fullName.toLowerCase().includes(searchLower) ||
+        a.phone.includes(clientSearch)
+    );
 
-        {filteredClients.length === 0 ? (
-          <p className="text-sm text-slate-500 py-8 text-center">
-            Les fiches clients apparaissent automatiquement après validation d’un premier
-            paiement.
-          </p>
-        ) : (
-          <div className="divide-y divide-slate-100">
-            {filteredClients.map((client) => {
-              const lastOrder = safeOrders.find(
-                (o) =>
-                  (o.customerPhone || '').replace(/\D/g, '') ===
-                  (client.phone || '').replace(/\D/g, '')
-              );
-              return (
-                <div key={client.clientId} className="py-4 space-y-3">
-                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-                    <div>
-                      <div className="font-bold text-[#26547C]">{client.name}</div>
-                      <div className="text-xs text-slate-600 tabular-nums">
-                        {client.phone} · {client.totalOrders} commande(s)
-                        {isAdmin ? ` · Total dépensé : ${formatFcfa(client.totalSpent)}` : ''}
+    return (
+      <div className="space-y-6">
+        {/* Registered Client Accounts */}
+        <div className="bg-white rounded-3xl p-6 border border-slate-200 shadow-sm space-y-4">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div>
+              <h2 className="font-display text-xl text-[#26547C]">
+                Comptes clients inscrits ({clientAccounts.length})
+              </h2>
+              <p className="text-xs text-slate-600 mt-0.5">
+                Chaque client consulte uniquement ses propres commandes après connexion sécurisée.
+              </p>
+            </div>
+            <div className="flex items-center gap-2">
+              <input
+                type="search"
+                value={clientSearch}
+                onChange={(e) => setClientSearch(e.target.value)}
+                placeholder="Rechercher @pseudo, nom ou téléphone..."
+                className="px-4 py-2 rounded-full bg-[#EDF2F4] text-sm min-w-[230px]"
+              />
+              <button
+                type="button"
+                onClick={() => void loadClientAccounts()}
+                disabled={clientAccountsLoading}
+                className="p-2.5 rounded-full bg-[#EDF2F4] text-[#26547C] hover:bg-[#119DA4]/15 min-h-[40px] min-w-[40px] flex items-center justify-center"
+                title="Actualiser les comptes"
+                aria-label="Actualiser les comptes"
+              >
+                <RefreshCw className={`w-4 h-4 ${clientAccountsLoading ? 'animate-spin' : ''}`} />
+              </button>
+            </div>
+          </div>
+
+          {clientAccountsError && (
+            <p className="text-xs font-medium text-[#EF233C] bg-[#EF233C]/10 px-4 py-2.5 rounded-2xl">
+              {clientAccountsError}
+            </p>
+          )}
+
+          {clientAccountsLoading && clientAccounts.length === 0 ? (
+            <div className="py-6 text-center text-sm text-slate-500">
+              <Loader2 className="w-5 h-5 animate-spin text-[#119DA4] mx-auto mb-1" />
+              Chargement des comptes clients...
+            </div>
+          ) : filteredAccounts.length === 0 ? (
+            <p className="text-sm text-slate-500 py-5 text-center">
+              Aucun compte client inscrit ne correspond à la recherche.
+            </p>
+          ) : (
+            <div className="divide-y divide-slate-100">
+              {filteredAccounts.map((acc) => {
+                const tempPwd = tempPasswordsMap[acc.accountId];
+                const busy = clientAccountBusyId === acc.accountId;
+                return (
+                  <div
+                    key={acc.accountId}
+                    className="py-3.5 flex flex-col lg:flex-row lg:items-center justify-between gap-3"
+                  >
+                    <div className="space-y-1 min-w-0">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="font-bold text-[#26547C]">
+                          {acc.fullName}
+                        </span>
+                        <span className="text-xs font-mono font-semibold text-[#119DA4] bg-[#119DA4]/10 px-2.5 py-0.5 rounded-full">
+                          @{acc.username}
+                        </span>
+                        <span
+                          className={`text-[11px] font-semibold px-2.5 py-0.5 rounded-full ${
+                            acc.active
+                              ? 'bg-[#2E9E6B]/15 text-[#237A52]'
+                              : 'bg-[#EF233C]/10 text-[#EF233C]'
+                          }`}
+                        >
+                          {acc.active ? 'Actif' : 'Désactivé'}
+                        </span>
+                        {acc.mustChangePassword && (
+                          <span className="text-[11px] font-semibold px-2.5 py-0.5 rounded-full bg-amber-50 text-amber-700 border border-amber-200">
+                            Mot de passe temporaire
+                          </span>
+                        )}
                       </div>
+                      <div className="text-xs text-slate-600 tabular-nums">
+                        {acc.phone} · {acc.ordersCount} commande(s) rattachée(s)
+                        {acc.createdAt
+                          ? ` · Inscrit le ${new Date(acc.createdAt).toLocaleDateString('fr-FR')}`
+                          : ''}
+                      </div>
+
+                      {tempPwd && (
+                        <div className="inline-flex flex-wrap items-center gap-2 mt-1 px-3 py-1.5 rounded-xl bg-amber-50 border border-amber-200 text-xs text-amber-950">
+                          <span>Mot de passe temporaire :</span>
+                          <strong className="font-mono text-sm select-all">{tempPwd}</strong>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              navigator.clipboard.writeText(tempPwd);
+                              setCopiedAccountPwdId(acc.accountId);
+                              setTimeout(() => setCopiedAccountPwdId(null), 2000);
+                            }}
+                            className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-white border border-amber-300 font-semibold text-amber-900"
+                          >
+                            {copiedAccountPwdId === acc.accountId ? (
+                              <Check className="w-3 h-3 text-[#2E9E6B]" />
+                            ) : (
+                              <Copy className="w-3 h-3" />
+                            )}
+                            Copier
+                          </button>
+                        </div>
+                      )}
                     </div>
-                    {lastOrder && (
-                      <button
-                        type="button"
-                        onClick={() => onReprintOrder(lastOrder)}
-                        className="inline-flex items-center gap-1.5 px-4 py-2 rounded-full bg-[#EDF2F4] text-[#26547C] text-xs font-semibold hover:bg-[#119DA4] hover:text-white transition-colors min-h-[40px] self-start"
-                      >
-                        <RefreshCw className="w-3.5 h-3.5" />
-                        Réimprimer ({lastOrder.orderNumber})
-                      </button>
+
+                    {isAdmin && (
+                      <div className="flex flex-wrap items-center gap-2 shrink-0">
+                        <button
+                          type="button"
+                          disabled={busy}
+                          onClick={async () => {
+                            setClientAccountBusyId(acc.accountId);
+                            setClientAccountsError(null);
+                            try {
+                              const res = await resetClientAccountPasswordServer(acc.accountId);
+                              setTempPasswordsMap((prev) => ({
+                                ...prev,
+                                [acc.accountId]: res.temporaryPassword,
+                              }));
+                              setClientAccounts((prev) =>
+                                prev.map((a) =>
+                                  a.accountId === acc.accountId
+                                    ? { ...a, mustChangePassword: true }
+                                    : a
+                                )
+                              );
+                            } catch (err) {
+                              setClientAccountsError(
+                                err instanceof Error
+                                  ? err.message
+                                  : 'Impossible de réinitialiser le mot de passe.'
+                              );
+                            } finally {
+                              setClientAccountBusyId(null);
+                            }
+                          }}
+                          className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-full bg-[#EDF2F4] text-[#26547C] text-xs font-semibold hover:bg-[#119DA4] hover:text-white transition-colors min-h-[38px]"
+                        >
+                          <KeyRound className="w-3.5 h-3.5" />
+                          Réinitialiser MDP
+                        </button>
+
+                        <button
+                          type="button"
+                          disabled={busy}
+                          onClick={async () => {
+                            setClientAccountBusyId(acc.accountId);
+                            setClientAccountsError(null);
+                            try {
+                              const updated = await toggleClientAccountActiveServer(
+                                acc.accountId,
+                                !acc.active
+                              );
+                              setClientAccounts((prev) =>
+                                prev.map((a) =>
+                                  a.accountId === acc.accountId ? { ...a, active: updated.active } : a
+                                )
+                              );
+                            } catch (err) {
+                              setClientAccountsError(
+                                err instanceof Error
+                                  ? err.message
+                                  : 'Impossible de modifier le statut du compte.'
+                              );
+                            } finally {
+                              setClientAccountBusyId(null);
+                            }
+                          }}
+                          className={`px-3.5 py-2 rounded-full text-xs font-semibold min-h-[38px] border transition-colors ${
+                            acc.active
+                              ? 'border-[#EF233C]/30 text-[#EF233C] hover:bg-[#EF233C]/10'
+                              : 'border-[#2E9E6B]/40 text-[#237A52] hover:bg-[#2E9E6B]/10'
+                          }`}
+                        >
+                          {acc.active ? 'Désactiver' : 'Réactiver'}
+                        </button>
+                      </div>
                     )}
                   </div>
-                  <div className="flex gap-2">
-                    <input
-                      type="text"
-                      value={noteDrafts[client.clientId] ?? client.notes ?? ''}
-                      onChange={(e) =>
-                        setNoteDrafts((p) => ({ ...p, [client.clientId]: e.target.value }))
-                      }
-                      placeholder="Notes atelier (préférences papier, délais habituels)..."
-                      className="flex-1 px-3.5 py-2 rounded-xl bg-[#EDF2F4] text-xs"
-                    />
-                    <button
-                      type="button"
-                      onClick={async () => {
-                        const notes = noteDrafts[client.clientId] ?? client.notes ?? '';
-                        if (useServerApi) {
-                          await saveClientNotesServer(client.clientId, notes);
-                          await onRefreshData?.();
-                        } else {
-                          await adminSaveClientNotes(client.clientId, notes);
-                        }
-                      }}
-                      className="px-4 py-2 rounded-xl bg-[#26547C] text-white text-xs font-semibold"
-                    >
-                      Enregistrer note
-                    </button>
-                  </div>
-                </div>
-              );
-            })}
+                );
+              })}
+            </div>
+          )}
+        </div>
+
+        {/* CRM Profiles */}
+        <div className="bg-white rounded-3xl p-6 border border-slate-200 shadow-sm space-y-5">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <h2 className="font-display text-xl text-[#26547C]">
+              Répertoire clients CRM ({safeClients.length})
+            </h2>
           </div>
-        )}
+
+          {filteredClients.length === 0 ? (
+            <p className="text-sm text-slate-500 py-8 text-center">
+              Les fiches clients apparaissent automatiquement après validation d’un premier
+              paiement.
+            </p>
+          ) : (
+            <div className="divide-y divide-slate-100">
+              {filteredClients.map((client) => {
+                const lastOrder = safeOrders.find(
+                  (o) =>
+                    (o.customerPhone || '').replace(/\D/g, '') ===
+                    (client.phone || '').replace(/\D/g, '')
+                );
+                return (
+                  <div key={client.clientId} className="py-4 space-y-3">
+                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                      <div>
+                        <div className="font-bold text-[#26547C]">{client.name}</div>
+                        <div className="text-xs text-slate-600 tabular-nums">
+                          {client.phone} · {client.totalOrders} commande(s)
+                          {isAdmin ? ` · Total dépensé : ${formatFcfa(client.totalSpent)}` : ''}
+                        </div>
+                      </div>
+                      {lastOrder && (
+                        <button
+                          type="button"
+                          onClick={() => onReprintOrder(lastOrder)}
+                          className="inline-flex items-center gap-1.5 px-4 py-2 rounded-full bg-[#EDF2F4] text-[#26547C] text-xs font-semibold hover:bg-[#119DA4] hover:text-white transition-colors min-h-[40px] self-start"
+                        >
+                          <RefreshCw className="w-3.5 h-3.5" />
+                          Réimprimer ({lastOrder.orderNumber})
+                        </button>
+                      )}
+                    </div>
+                    <div className="flex gap-2">
+                      <input
+                        type="text"
+                        value={noteDrafts[client.clientId] ?? client.notes ?? ''}
+                        onChange={(e) =>
+                          setNoteDrafts((p) => ({ ...p, [client.clientId]: e.target.value }))
+                        }
+                        placeholder="Notes atelier (préférences papier, délais habituels)..."
+                        className="flex-1 px-3.5 py-2 rounded-xl bg-[#EDF2F4] text-xs"
+                      />
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          const notes = noteDrafts[client.clientId] ?? client.notes ?? '';
+                          if (useServerApi) {
+                            await saveClientNotesServer(client.clientId, notes);
+                            await onRefreshData?.();
+                          } else {
+                            await adminSaveClientNotes(client.clientId, notes);
+                          }
+                        }}
+                        className="px-4 py-2 rounded-xl bg-[#26547C] text-white text-xs font-semibold"
+                      >
+                        Enregistrer note
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
       </div>
     );
   }

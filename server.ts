@@ -22,7 +22,9 @@ const FILES_DIR = path.join(UPLOADS_ROOT, 'files');
 const INDEX_FILE = path.join(UPLOADS_ROOT, 'index.json');
 const SESSION_SECRET_FILE = path.join(UPLOADS_ROOT, '.staff_session_secret');
 const STAFF_COOKIE_NAME = 'fbc_staff_session';
+const CLIENT_COOKIE_NAME = 'fbc_client_session';
 const SESSION_TTL_MS = 12 * 60 * 60 * 1000;
+const CLIENT_SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const BOOTSTRAPPED_ADMIN_EMAIL = 'ouattaraabdoulaye479@gmail.com';
 const ALLOWED_ORIGINS = new Set([
   'https://fbc-print.onrender.com',
@@ -79,9 +81,17 @@ function getSessionSecret(): string {
 const SESSION_SECRET = getSessionSecret();
 
 interface StaffSessionPayload {
+  type?: 'staff';
   accessId: string;
   role: 'admin' | 'operator';
   displayName: string;
+  exp: number;
+}
+
+interface ClientSessionPayload {
+  type: 'client';
+  accountId: string;
+  username: string;
   exp: number;
 }
 
@@ -92,6 +102,34 @@ interface ResolvedStaffCaller {
   displayName: string;
   accessId?: string;
   authMethod: 'google' | 'credentials';
+}
+
+interface ClientAccountDoc {
+  accountId: string;
+  username: string;
+  usernameLower: string;
+  fullName: string;
+  phone: string;
+  phoneNormalized: string;
+  passwordHash: string;
+  passwordSalt: string;
+  mustChangePassword?: boolean;
+  active: boolean;
+  lastLoginAt?: string;
+  createdAt: unknown;
+  updatedAt: unknown;
+}
+
+interface ResolvedClientCaller {
+  accountId: string;
+  username: string;
+  fullName: string;
+  phone: string;
+  phoneNormalized: string;
+  mustChangePassword: boolean;
+  active: boolean;
+  lastLoginAt?: string;
+  createdAt?: string;
 }
 
 interface StaffCredentialDoc {
@@ -125,7 +163,7 @@ function parseCookies(cookieHeader: string | undefined): Record<string, string> 
 }
 
 function signStaffToken(payload: StaffSessionPayload): string {
-  const data = Buffer.from(JSON.stringify(payload), 'utf-8').toString('base64url');
+  const data = Buffer.from(JSON.stringify({ ...payload, type: 'staff' }), 'utf-8').toString('base64url');
   const sig = crypto
     .createHmac('sha256', SESSION_SECRET)
     .update(data)
@@ -152,7 +190,7 @@ function verifyStaffToken(token: string | undefined): StaffSessionPayload | null
     const parsed = JSON.parse(
       Buffer.from(data, 'base64url').toString('utf-8')
     ) as StaffSessionPayload;
-    if (!parsed.accessId || !parsed.exp || Date.now() > parsed.exp) {
+    if ((parsed.type && parsed.type !== 'staff') || !parsed.accessId || !parsed.exp || Date.now() > parsed.exp) {
       return null;
     }
     return parsed;
@@ -161,33 +199,87 @@ function verifyStaffToken(token: string | undefined): StaffSessionPayload | null
   }
 }
 
-function setStaffSessionCookie(
+function signClientToken(payload: Omit<ClientSessionPayload, 'type'>): string {
+  const data = Buffer.from(
+    JSON.stringify({ ...payload, type: 'client' } satisfies ClientSessionPayload),
+    'utf-8'
+  ).toString('base64url');
+  const sig = crypto
+    .createHmac('sha256', SESSION_SECRET)
+    .update(data)
+    .digest('base64url');
+  return `${data}.${sig}`;
+}
+
+function verifyClientToken(token: string | undefined): ClientSessionPayload | null {
+  if (!token) return null;
+  const parts = token.split('.');
+  if (parts.length !== 2) return null;
+  const [data, sig] = parts;
+  if (!data || !sig) return null;
+  const expectedSig = crypto
+    .createHmac('sha256', SESSION_SECRET)
+    .update(data)
+    .digest('base64url');
+  const sigBuf = Buffer.from(sig, 'utf-8');
+  const expBuf = Buffer.from(expectedSig, 'utf-8');
+  if (sigBuf.length !== expBuf.length || !crypto.timingSafeEqual(sigBuf, expBuf)) {
+    return null;
+  }
+  try {
+    const parsed = JSON.parse(
+      Buffer.from(data, 'base64url').toString('utf-8')
+    ) as ClientSessionPayload;
+    if (parsed.type !== 'client' || !parsed.accountId || !parsed.exp || Date.now() > parsed.exp) {
+      return null;
+    }
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function appendSessionCookie(
   req: express.Request,
   res: express.Response,
-  token: string
+  name: string,
+  value: string,
+  maxAgeMs: number
 ) {
   const isHttps =
     req.secure ||
     String(req.headers['x-forwarded-proto'] || '')
       .split(',')[0]
       .trim() === 'https';
-  const maxAgeSec = Math.floor(SESSION_TTL_MS / 1000);
+  const maxAgeSec = maxAgeMs <= 0 ? 0 : Math.floor(maxAgeMs / 1000);
   const attrs = isHttps
     ? `HttpOnly; Path=/; SameSite=None; Secure; Partitioned; Max-Age=${maxAgeSec}`
     : `HttpOnly; Path=/; SameSite=Lax; Max-Age=${maxAgeSec}`;
-  res.setHeader('Set-Cookie', `${STAFF_COOKIE_NAME}=${encodeURIComponent(token)}; ${attrs}`);
+  res.append('Set-Cookie', `${name}=${encodeURIComponent(value)}; ${attrs}`);
+}
+
+function setStaffSessionCookie(
+  req: express.Request,
+  res: express.Response,
+  token: string
+) {
+  appendSessionCookie(req, res, STAFF_COOKIE_NAME, token, SESSION_TTL_MS);
 }
 
 function clearStaffSessionCookie(req: express.Request, res: express.Response) {
-  const isHttps =
-    req.secure ||
-    String(req.headers['x-forwarded-proto'] || '')
-      .split(',')[0]
-      .trim() === 'https';
-  const attrs = isHttps
-    ? 'HttpOnly; Path=/; SameSite=None; Secure; Partitioned; Max-Age=0'
-    : 'HttpOnly; Path=/; SameSite=Lax; Max-Age=0';
-  res.setHeader('Set-Cookie', `${STAFF_COOKIE_NAME}=; ${attrs}`);
+  appendSessionCookie(req, res, STAFF_COOKIE_NAME, '', 0);
+}
+
+function setClientSessionCookie(
+  req: express.Request,
+  res: express.Response,
+  token: string
+) {
+  appendSessionCookie(req, res, CLIENT_COOKIE_NAME, token, CLIENT_SESSION_TTL_MS);
+}
+
+function clearClientSessionCookie(req: express.Request, res: express.Response) {
+  appendSessionCookie(req, res, CLIENT_COOKIE_NAME, '', 0);
 }
 
 function hashStaffPassword(password: string): { salt: string; hash: string } {
@@ -353,17 +445,45 @@ function toPublicStaffCredential(docData: StaffCredentialDoc) {
   };
 }
 
-function normalizePhoneServer(input: string): string {
-  const digits = input.replace(/\D/g, '');
-  if (digits.startsWith('226') && digits.length === 11) {
-    return digits.slice(3);
-  }
-  return digits.slice(-8);
+function toPublicClientAccount(docData: ClientAccountDoc): ResolvedClientCaller {
+  return {
+    accountId: docData.accountId,
+    username: docData.username,
+    fullName: docData.fullName,
+    phone: docData.phone,
+    phoneNormalized: docData.phoneNormalized,
+    mustChangePassword: Boolean(docData.mustChangePassword),
+    active: Boolean(docData.active),
+    lastLoginAt: docData.lastLoginAt || undefined,
+    createdAt: serializeFirestoreValue(docData.createdAt) as string | undefined,
+  };
 }
 
-function buildLookupKeyServer(orderNumber: string, phone: string): string {
-  const cleanOrder = orderNumber.trim().toUpperCase().replace(/[^A-Z0-9-]/g, '');
-  return `${cleanOrder}_${normalizePhoneServer(phone)}`;
+function normalizePhoneServer(input: string): string {
+  const digits = input.replace(/\D/g, '');
+  let local = digits;
+  if (digits.startsWith('226') && digits.length === 11) {
+    local = digits.slice(3);
+  } else if (digits.startsWith('00226') && digits.length === 13) {
+    local = digits.slice(5);
+  }
+  if (local.length !== 8) {
+    return digits;
+  }
+  return `226${local}`;
+}
+
+function formatNormalizedBurkinaPhone(phoneNormalized: string): string {
+  if (phoneNormalized.length === 11 && phoneNormalized.startsWith('226')) {
+    const local = phoneNormalized.slice(3);
+    return `+226 ${local.slice(0, 2)} ${local.slice(2, 4)} ${local.slice(4, 6)} ${local.slice(6, 8)}`;
+  }
+  return `+${phoneNormalized}`;
+}
+
+function buildLookupKeyServer(trackingCode: string, phone: string): string {
+  const cleanCode = trackingCode.trim().toUpperCase().replace(/[^A-Z0-9-]/g, '');
+  return `${cleanCode}_${normalizePhoneServer(phone)}`;
 }
 
 async function writeServerAuditLog(params: {
@@ -464,6 +584,32 @@ async function resolveServerStaffCaller(
   };
 }
 
+async function resolveServerClientCaller(
+  req: express.Request
+): Promise<ResolvedClientCaller | null> {
+  const authHeader = req.headers.authorization;
+  const bearerTwoPart =
+    authHeader && authHeader.startsWith('Bearer ')
+      ? authHeader.slice(7).trim()
+      : '';
+  const rawHeaderToken =
+    typeof req.headers['x-client-session'] === 'string'
+      ? req.headers['x-client-session'].trim()
+      : bearerTwoPart && bearerTwoPart.split('.').length === 2
+        ? bearerTwoPart
+        : '';
+
+  const cookies = parseCookies(req.headers.cookie);
+  const payload = verifyClientToken(rawHeaderToken || cookies[CLIENT_COOKIE_NAME]);
+  if (!payload) return null;
+
+  const accSnap = await adminDb.collection('client_accounts').doc(payload.accountId).get();
+  if (!accSnap.exists) return null;
+  const acc = accSnap.data() as ClientAccountDoc;
+  if (!acc.active) return null;
+  return toPublicClientAccount(acc);
+}
+
 interface StoredFileRecord {
   fileId: string;
   originalName: string;
@@ -474,6 +620,9 @@ interface StoredFileRecord {
   uploadedBytes: number;
   complete: boolean;
   sha256: string;
+  purpose?: 'order_file' | 'payment_proof' | 'service_image';
+  isPublicAsset?: boolean;
+  ownerClientAccountId?: string;
   widthPx?: number;
   heightPx?: number;
   widthCm?: number;
@@ -598,7 +747,7 @@ async function startServer() {
       res.setHeader('Access-Control-Allow-Credentials', 'true');
       res.setHeader(
         'Access-Control-Allow-Headers',
-        'Content-Type, Authorization, X-Staff-Session'
+        'Content-Type, Authorization, X-Staff-Session, X-Client-Session'
       );
       res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS');
       if (req.method === 'OPTIONS') {
@@ -614,57 +763,200 @@ async function startServer() {
     res.json({ status: 'ok', service: 'fbc-print-server', timestamp: new Date().toISOString() });
   });
 
-  // 1. Initialize a chunked resumable upload (no compression)
-  app.post('/api/uploads/init', (req, res) => {
-    const { fileName, totalSize, mimeType } = req.body as {
-      fileName?: string;
-      totalSize?: number;
-      mimeType?: string;
-    };
+  async function isFileReferencedByCatalogService(fileId: string): Promise<boolean> {
+    try {
+      const previewPath = `/api/files/${fileId}/preview`;
+      const snap = await adminDb
+        .collection('services')
+        .where('imageUrl', '==', previewPath)
+        .limit(1)
+        .get();
+      return !snap.empty;
+    } catch {
+      return false;
+    }
+  }
 
-    if (!fileName || typeof totalSize !== 'number' || totalSize <= 0) {
-      res.status(400).json({ error: 'Fichier vide ou paramètres invalides.' });
-      return;
+  async function doesClientOwnFile(clientAccountId: string, fileId: string): Promise<boolean> {
+    const ordersSnap = await adminDb
+      .collection('orders')
+      .where('clientAccountId', '==', clientAccountId)
+      .get();
+    const ownedOrderIds = new Set<string>();
+    for (const d of ordersSnap.docs) {
+      const ord = d.data() as {
+        orderId?: string;
+        files?: Array<{ fileId?: string }>;
+      };
+      if (ord.orderId) ownedOrderIds.add(ord.orderId);
+      if (Array.isArray(ord.files) && ord.files.some((f) => f.fileId === fileId)) {
+        return true;
+      }
+    }
+    if (ownedOrderIds.size > 0) {
+      const paySnap = await adminDb
+        .collection('payments')
+        .where('screenshotFileId', '==', fileId)
+        .limit(5)
+        .get();
+      for (const pDoc of paySnap.docs) {
+        const pay = pDoc.data() as { orderId?: string };
+        if (pay.orderId && ownedOrderIds.has(pay.orderId)) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  async function authorizeStoredFileRequest(
+    req: express.Request,
+    res: express.Response,
+    record: StoredFileRecord
+  ): Promise<boolean> {
+    if (record.isPublicAsset || record.purpose === 'service_image') {
+      return true;
+    }
+    // Backward compatibility for service catalog thumbnails uploaded before isPublicAsset existed
+    if (!record.purpose && !record.ownerClientAccountId) {
+      const isCatalogImg = await isFileReferencedByCatalogService(record.fileId);
+      if (isCatalogImg) {
+        record.isPublicAsset = true;
+        record.purpose = 'service_image';
+        saveIndex(uploadsIndex);
+        return true;
+      }
     }
 
-    const ext = path.extname(fileName).toLowerCase();
-    const fileId = `fil_${Date.now()}_${crypto.randomBytes(6).toString('hex')}`;
-    const safeStorageName = `${fileId}${ext || '.bin'}`;
-    const targetPath = path.join(FILES_DIR, safeStorageName);
+    const staff = await resolveServerStaffCaller(req).catch(() => null);
+    if (staff) return true;
 
-    fs.writeFileSync(targetPath, Buffer.alloc(0));
+    const client = await resolveServerClientCaller(req).catch(() => null);
+    if (!client) {
+      res.status(401).json({ error: 'Authentification requise pour accéder à ce fichier.' });
+      return false;
+    }
 
-    const record: StoredFileRecord = {
-      fileId,
-      originalName: path.basename(fileName),
-      safeStorageName,
-      extension: ext,
-      mimeType: mimeType || 'application/octet-stream',
-      totalSize,
-      uploadedBytes: 0,
-      complete: false,
-      sha256: '',
-      previewAvailable: false,
-      createdAt: new Date().toISOString(),
-    };
+    if (record.ownerClientAccountId === client.accountId) {
+      return true;
+    }
 
-    uploadsIndex[fileId] = record;
-    saveIndex(uploadsIndex);
+    const ownsViaOrder = await doesClientOwnFile(client.accountId, record.fileId);
+    if (ownsViaOrder) {
+      if (!record.ownerClientAccountId) {
+        record.ownerClientAccountId = client.accountId;
+        saveIndex(uploadsIndex);
+      }
+      return true;
+    }
 
-    res.json({
-      fileId,
-      chunkSize: 1024 * 1024, // 1 MB chunks for stable mobile resume
-      uploadedBytes: 0,
-    });
+    res.status(403).json({ error: 'Accès interdit à un fichier appartenant à un autre client.' });
+    return false;
+  }
+
+  // 1. Initialize a chunked resumable upload (no compression)
+  app.post('/api/uploads/init', async (req, res) => {
+    try {
+      const { fileName, totalSize, mimeType, purpose } = (req.body || {}) as {
+        fileName?: string;
+        totalSize?: number;
+        mimeType?: string;
+        purpose?: 'order_file' | 'payment_proof' | 'service_image';
+      };
+
+      const resolvedPurpose: 'order_file' | 'payment_proof' | 'service_image' =
+        purpose === 'service_image'
+          ? 'service_image'
+          : purpose === 'payment_proof'
+            ? 'payment_proof'
+            : 'order_file';
+
+      const staff = await resolveServerStaffCaller(req).catch(() => null);
+      const client = staff ? null : await resolveServerClientCaller(req).catch(() => null);
+
+      if (resolvedPurpose === 'service_image') {
+        if (!staff) {
+          res.status(403).json({ error: 'Authentification atelier requise pour importer une image de prestation.' });
+          return;
+        }
+      } else if (!staff && !client) {
+        res.status(401).json({ error: 'Veuillez vous connecter à votre compte client avant d’envoyer vos fichiers.' });
+        return;
+      }
+
+      if (!fileName || typeof totalSize !== 'number' || totalSize <= 0) {
+        res.status(400).json({ error: 'Fichier vide ou paramètres invalides.' });
+        return;
+      }
+
+      const ext = path.extname(fileName).toLowerCase();
+      const fileId = `fil_${Date.now()}_${crypto.randomBytes(6).toString('hex')}`;
+      const safeStorageName = `${fileId}${ext || '.bin'}`;
+      const targetPath = path.join(FILES_DIR, safeStorageName);
+
+      fs.writeFileSync(targetPath, Buffer.alloc(0));
+
+      const record: StoredFileRecord = {
+        fileId,
+        originalName: path.basename(fileName),
+        safeStorageName,
+        extension: ext,
+        mimeType: mimeType || 'application/octet-stream',
+        totalSize,
+        uploadedBytes: 0,
+        complete: false,
+        sha256: '',
+        purpose: resolvedPurpose,
+        isPublicAsset: resolvedPurpose === 'service_image',
+        ...(client ? { ownerClientAccountId: client.accountId } : {}),
+        previewAvailable: false,
+        createdAt: new Date().toISOString(),
+      };
+
+      uploadsIndex[fileId] = record;
+      saveIndex(uploadsIndex);
+
+      res.json({
+        fileId,
+        chunkSize: 1024 * 1024, // 1 MB chunks for stable mobile resume
+        uploadedBytes: 0,
+      });
+    } catch (err) {
+      handleServerApiError(res, err, 'Impossible d’initialiser le transfert.');
+    }
   });
 
+  async function canMutateUpload(
+    req: express.Request,
+    res: express.Response,
+    record: StoredFileRecord
+  ): Promise<boolean> {
+    const staff = await resolveServerStaffCaller(req).catch(() => null);
+    if (staff) return true;
+    if (record.purpose === 'service_image') {
+      res.status(403).json({ error: 'Authentification atelier requise.' });
+      return false;
+    }
+    const client = await resolveServerClientCaller(req).catch(() => null);
+    if (!client) {
+      res.status(401).json({ error: 'Authentification client requise.' });
+      return false;
+    }
+    if (record.ownerClientAccountId && record.ownerClientAccountId !== client.accountId) {
+      res.status(403).json({ error: 'Accès interdit à ce transfert.' });
+      return false;
+    }
+    return true;
+  }
+
   // 2. Check upload status for automatic resume after network drop
-  app.get('/api/uploads/:fileId/status', (req, res) => {
+  app.get('/api/uploads/:fileId/status', async (req, res) => {
     const record = uploadsIndex[req.params.fileId];
     if (!record) {
       res.status(404).json({ error: 'Session de transfert introuvable.' });
       return;
     }
+    if (!(await canMutateUpload(req, res, record))) return;
     const targetPath = path.join(FILES_DIR, record.safeStorageName);
     const actualSize = fs.existsSync(targetPath) ? fs.statSync(targetPath).size : 0;
     record.uploadedBytes = actualSize;
@@ -680,12 +972,13 @@ async function startServer() {
   app.put(
     '/api/uploads/:fileId/chunk',
     express.raw({ type: 'application/octet-stream', limit: '16mb' }),
-    (req, res) => {
+    async (req, res) => {
       const record = uploadsIndex[req.params.fileId];
       if (!record) {
         res.status(404).json({ error: 'Session de transfert introuvable.' });
         return;
       }
+      if (!(await canMutateUpload(req, res, record))) return;
 
       const offsetHeader = req.headers['x-chunk-offset'];
       const offset = typeof offsetHeader === 'string' ? parseInt(offsetHeader, 10) : NaN;
@@ -723,6 +1016,7 @@ async function startServer() {
       res.status(404).json({ error: 'Session de transfert introuvable.' });
       return;
     }
+    if (!(await canMutateUpload(req, res, record))) return;
 
     const targetPath = path.join(FILES_DIR, record.safeStorageName);
     if (!fs.existsSync(targetPath)) {
@@ -772,110 +1066,156 @@ async function startServer() {
     });
   });
 
-  // 5. Download original uncompressed file byte-for-byte
-  app.get('/api/files/:fileId/download', (req, res) => {
-    const record = uploadsIndex[req.params.fileId];
-    if (!record || !record.complete) {
-      res.status(404).json({ error: 'Fichier introuvable.' });
-      return;
-    }
-    const targetPath = path.join(FILES_DIR, record.safeStorageName);
-    if (!fs.existsSync(targetPath)) {
-      res.status(404).json({ error: 'Fichier physique absent.' });
-      return;
-    }
-
-    res.setHeader('Content-Type', record.mimeType || 'application/octet-stream');
-    res.setHeader('Content-Length', String(record.totalSize));
-    res.setHeader(
-      'Content-Disposition',
-      `attachment; filename*=UTF-8''${encodeURIComponent(record.originalName)}`
-    );
-    fs.createReadStream(targetPath).pipe(res);
-  });
-
-  // 6. Preview file inline (images & PDFs) without altering the original file
-  app.get('/api/files/:fileId/preview', (req, res) => {
-    const record = uploadsIndex[req.params.fileId];
-    if (!record || !record.complete) {
-      res.status(404).json({ error: 'Aperçu indisponible.' });
-      return;
-    }
-    const targetPath = path.join(FILES_DIR, record.safeStorageName);
-    if (!fs.existsSync(targetPath)) {
-      res.status(404).json({ error: 'Fichier physique absent.' });
-      return;
-    }
-
-    const mimeMap: Record<string, string> = {
-      '.jpg': 'image/jpeg',
-      '.jpeg': 'image/jpeg',
-      '.png': 'image/png',
-      '.webp': 'image/webp',
-      '.gif': 'image/gif',
-      '.svg': 'image/svg+xml',
-      '.pdf': 'application/pdf',
-    };
-    res.setHeader('Content-Type', mimeMap[record.extension] || record.mimeType || 'application/octet-stream');
-    res.setHeader('Content-Disposition', `inline; filename*=UTF-8''${encodeURIComponent(record.originalName)}`);
-    fs.createReadStream(targetPath).pipe(res);
-  });
-
-  // 7. Bundle all original files of an order into a single ZIP without recompression
-  app.post('/api/orders/:orderId/files-zip', (req, res) => {
-    const { files, orderNumber } = (req.body || {}) as {
-      files?: Array<{ fileId: string; originalName?: string; slotLabel?: string }>;
-      orderNumber?: string;
-    };
-
-    if (!files || !Array.isArray(files) || files.length === 0) {
-      res.status(400).json({ error: 'Aucun fichier à archiver.' });
-      return;
-    }
-
-    const entries: Array<{ targetPath: string; entryName: string }> = [];
-    const usedNames = new Set<string>();
-    for (const item of files) {
-      const record = uploadsIndex[item.fileId];
-      if (!record || !record.complete) continue;
-      const targetPath = path.join(FILES_DIR, record.safeStorageName);
-      if (!fs.existsSync(targetPath)) continue;
-
-      const prefix = item.slotLabel ? `[${item.slotLabel.replace(/[^a-zA-Z0-9_-]/g, '_')}]_` : '';
-      let entryName = `${prefix}${record.originalName}`;
-      let counter = 1;
-      while (usedNames.has(entryName)) {
-        entryName = `${counter}_${prefix}${record.originalName}`;
-        counter++;
+  // 5. Download original uncompressed file byte-for-byte (staff or owning client only)
+  app.get('/api/files/:fileId/download', async (req, res) => {
+    try {
+      const record = uploadsIndex[req.params.fileId];
+      if (!record || !record.complete) {
+        res.status(404).json({ error: 'Fichier introuvable.' });
+        return;
       }
-      usedNames.add(entryName);
-      entries.push({ targetPath, entryName });
+      if (!(await authorizeStoredFileRequest(req, res, record))) return;
+
+      const targetPath = path.join(FILES_DIR, record.safeStorageName);
+      if (!fs.existsSync(targetPath)) {
+        res.status(404).json({ error: 'Fichier physique absent.' });
+        return;
+      }
+
+      res.setHeader('Content-Type', record.mimeType || 'application/octet-stream');
+      res.setHeader('Content-Length', String(record.totalSize));
+      res.setHeader(
+        'Content-Disposition',
+        `attachment; filename*=UTF-8''${encodeURIComponent(record.originalName)}`
+      );
+      fs.createReadStream(targetPath).pipe(res);
+    } catch (err) {
+      handleServerApiError(res, err, 'Impossible de télécharger ce fichier.');
     }
+  });
 
-    if (entries.length === 0) {
-      res.status(404).json({ error: 'Aucun fichier original disponible sur le serveur pour cette commande.' });
-      return;
+  // 6. Preview file inline (images & PDFs; public only for catalog images, otherwise staff/owner)
+  app.get('/api/files/:fileId/preview', async (req, res) => {
+    try {
+      const record = uploadsIndex[req.params.fileId];
+      if (!record || !record.complete) {
+        res.status(404).json({ error: 'Aperçu indisponible.' });
+        return;
+      }
+      if (!(await authorizeStoredFileRequest(req, res, record))) return;
+
+      const targetPath = path.join(FILES_DIR, record.safeStorageName);
+      if (!fs.existsSync(targetPath)) {
+        res.status(404).json({ error: 'Fichier physique absent.' });
+        return;
+      }
+
+      const mimeMap: Record<string, string> = {
+        '.jpg': 'image/jpeg',
+        '.jpeg': 'image/jpeg',
+        '.png': 'image/png',
+        '.webp': 'image/webp',
+        '.gif': 'image/gif',
+        '.svg': 'image/svg+xml',
+        '.pdf': 'application/pdf',
+      };
+      res.setHeader('Content-Type', mimeMap[record.extension] || record.mimeType || 'application/octet-stream');
+      res.setHeader('Content-Disposition', `inline; filename*=UTF-8''${encodeURIComponent(record.originalName)}`);
+      fs.createReadStream(targetPath).pipe(res);
+    } catch (err) {
+      handleServerApiError(res, err, 'Impossible d’afficher cet aperçu.');
     }
+  });
 
-    const archiveName = `${orderNumber || req.params.orderId}_fichiers_originaux.zip`;
-    res.setHeader('Content-Type', 'application/zip');
-    res.setHeader(
-      'Content-Disposition',
-      `attachment; filename*=UTF-8''${encodeURIComponent(archiveName)}`
-    );
+  // 7. Bundle all original files of an order into a single ZIP without recompression (staff or owner)
+  app.post('/api/orders/:orderId/files-zip', async (req, res) => {
+    try {
+      const staff = await resolveServerStaffCaller(req).catch(() => null);
+      const client = staff ? null : await resolveServerClientCaller(req).catch(() => null);
+      if (!staff && !client) {
+        res.status(401).json({ error: 'Authentification requise pour télécharger cette archive.' });
+        return;
+      }
 
-    const archive = new ZipArchive({ store: true }); // store: true -> ZERO compression, byte-for-byte
-    archive.on('error', (err: Error) => {
-      console.error('ZIP error:', err);
-      if (!res.headersSent) res.status(500).json({ error: 'Erreur lors de la création de l’archive ZIP.' });
-    });
-    archive.pipe(res);
+      const orderSnap = await adminDb.collection('orders').doc(req.params.orderId).get();
+      if (!orderSnap.exists) {
+        res.status(404).json({ error: 'Commande introuvable.' });
+        return;
+      }
+      const orderData = orderSnap.data() as {
+        clientAccountId?: string;
+        orderNumber?: string;
+        files?: Array<{ fileId: string; originalName?: string; slotLabel?: string; replaced?: boolean }>;
+      };
 
-    for (const entry of entries) {
-      archive.file(entry.targetPath, { name: entry.entryName });
+      if (!staff && client && orderData.clientAccountId !== client.accountId) {
+        res.status(403).json({ error: 'Accès interdit aux fichiers d’une autre commande.' });
+        return;
+      }
+
+      const { files, orderNumber } = (req.body || {}) as {
+        files?: Array<{ fileId: string; originalName?: string; slotLabel?: string }>;
+        orderNumber?: string;
+      };
+
+      const requestedList =
+        Array.isArray(files) && files.length > 0
+          ? files
+          : (orderData.files || []).filter((f) => !f.replaced);
+
+      if (requestedList.length === 0) {
+        res.status(400).json({ error: 'Aucun fichier à archiver.' });
+        return;
+      }
+
+      const allowedOrderFileIds = new Set((orderData.files || []).map((f) => f.fileId));
+      const entries: Array<{ targetPath: string; entryName: string }> = [];
+      const usedNames = new Set<string>();
+      for (const item of requestedList) {
+        if (!allowedOrderFileIds.has(item.fileId)) continue;
+        const record = uploadsIndex[item.fileId];
+        if (!record || !record.complete) continue;
+        const targetPath = path.join(FILES_DIR, record.safeStorageName);
+        if (!fs.existsSync(targetPath)) continue;
+
+        const prefix = item.slotLabel ? `[${item.slotLabel.replace(/[^a-zA-Z0-9_-]/g, '_')}]_` : '';
+        let entryName = `${prefix}${record.originalName}`;
+        let counter = 1;
+        while (usedNames.has(entryName)) {
+          entryName = `${counter}_${prefix}${record.originalName}`;
+          counter++;
+        }
+        usedNames.add(entryName);
+        entries.push({ targetPath, entryName });
+      }
+
+      if (entries.length === 0) {
+        res.status(404).json({ error: 'Aucun fichier original disponible sur le serveur pour cette commande.' });
+        return;
+      }
+
+      const archiveName = `${orderNumber || orderData.orderNumber || req.params.orderId}_fichiers_originaux.zip`;
+      res.setHeader('Content-Type', 'application/zip');
+      res.setHeader(
+        'Content-Disposition',
+        `attachment; filename*=UTF-8''${encodeURIComponent(archiveName)}`
+      );
+
+      const archive = new ZipArchive({ store: true }); // store: true -> ZERO compression, byte-for-byte
+      archive.on('error', (err: Error) => {
+        console.error('ZIP error:', err);
+        if (!res.headersSent) res.status(500).json({ error: 'Erreur lors de la création de l’archive ZIP.' });
+      });
+      archive.pipe(res);
+
+      for (const entry of entries) {
+        archive.file(entry.targetPath, { name: entry.entryName });
+      }
+
+      archive.finalize();
+    } catch (err) {
+      handleServerApiError(res, err, 'Impossible de générer l’archive ZIP.');
     }
-
-    archive.finalize();
   });
 
   // --- Server-Side Staff Authentication (Unique ID + Custom Password) & Admin API ---
@@ -1334,8 +1674,25 @@ async function startServer() {
       const orderId = `ord_${randomIdToken(16)}`;
       const nowIso = new Date().toISOString();
 
+      const normalizedPhone = normalizePhoneServer(String(payload.customerPhone || ''));
+      let matchedClientAccountId =
+        typeof payload.clientAccountId === 'string' && payload.clientAccountId.trim()
+          ? payload.clientAccountId.trim()
+          : undefined;
+      if (!matchedClientAccountId && normalizedPhone.length === 11) {
+        const accSnap = await adminDb
+          .collection('client_accounts')
+          .where('phoneNormalized', '==', normalizedPhone)
+          .limit(1)
+          .get();
+        if (!accSnap.empty) {
+          matchedClientAccountId = accSnap.docs[0].id;
+        }
+      }
+
       const orderDoc = sanitizeServerFirestore({
         ...payload,
+        ...(matchedClientAccountId ? { clientAccountId: matchedClientAccountId } : {}),
         orderId,
         orderNumber,
         quoteNumber,
@@ -1356,7 +1713,7 @@ async function startServer() {
       });
 
       const lookupKey = buildLookupKeyServer(
-        orderNumber,
+        trackingCode,
         String(payload.customerPhone || '')
       );
 
@@ -1378,7 +1735,13 @@ async function startServer() {
         details: `Client : ${String(payload.customerName || '')}`,
       });
 
-      res.status(201).json({ orderId, orderNumber, quoteNumber, trackingCode });
+      res.status(201).json({
+        orderId,
+        orderNumber,
+        quoteNumber,
+        trackingCode,
+        order: serializeFirestoreValue({ ...orderDoc, createdAt: nowIso, updatedAt: nowIso }),
+      });
     } catch (err) {
       handleServerApiError(res, err, 'Impossible de créer la commande manuelle.');
     }
@@ -1873,6 +2236,950 @@ async function startServer() {
     } catch (err) {
       handleServerApiError(res, err, 'Impossible d’enregistrer les réglages.');
     }
+  });
+
+  // --- Server-Side Client Accounts, Authenticated Order Workspace & Privacy Enforcement ---
+
+  const clientAttemptsByIp = new Map<string, number[]>();
+  function isClientRateLimited(req: express.Request, maxHits = 25, windowMs = 5 * 60 * 1000): boolean {
+    const ip =
+      req.ip ||
+      (typeof req.headers['x-forwarded-for'] === 'string'
+        ? req.headers['x-forwarded-for'].split(',')[0].trim()
+        : 'unknown');
+    const now = Date.now();
+    const recent = (clientAttemptsByIp.get(ip) || []).filter((ts) => now - ts < windowMs);
+    if (recent.length >= maxHits) return true;
+    recent.push(now);
+    if (clientAttemptsByIp.size > 500) {
+      for (const [key, timestamps] of clientAttemptsByIp.entries()) {
+        if (!timestamps.some((ts) => now - ts < windowMs)) {
+          clientAttemptsByIp.delete(key);
+        }
+      }
+    }
+    clientAttemptsByIp.set(ip, recent);
+    return false;
+  }
+
+  function validateUsername(raw: unknown): { valid: boolean; clean: string; lower: string; error?: string } {
+    if (typeof raw !== 'string') {
+      return { valid: false, clean: '', lower: '', error: 'Nom d’utilisateur requis.' };
+    }
+    const clean = raw.trim();
+    if (!/^[a-zA-Z0-9._-]{3,30}$/.test(clean)) {
+      return {
+        valid: false,
+        clean,
+        lower: clean.toLowerCase(),
+        error: 'Le nom d’utilisateur doit contenir entre 3 et 30 caractères (lettres, chiffres, ".", "_" ou "-").',
+      };
+    }
+    return { valid: true, clean, lower: clean.toLowerCase() };
+  }
+
+  function bindOrderFilesToClient(files: unknown, accountId: string) {
+    if (!Array.isArray(files)) return;
+    let mutated = false;
+    for (const f of files) {
+      const fid = f && typeof f === 'object' ? (f as { fileId?: unknown }).fileId : null;
+      if (typeof fid === 'string' && uploadsIndex[fid] && !uploadsIndex[fid].ownerClientAccountId) {
+        uploadsIndex[fid].ownerClientAccountId = accountId;
+        mutated = true;
+      }
+    }
+    if (mutated) saveIndex(uploadsIndex);
+  }
+
+  async function attachOrVerifyTrackingCode(
+    caller: { accountId: string; phoneNormalized: string },
+    rawTrackingCode: string
+  ): Promise<{
+    ok: boolean;
+    status?: number;
+    error?: string;
+    order?: Record<string, unknown>;
+    claimed?: boolean;
+  }> {
+    const cleanCode = rawTrackingCode.trim().toUpperCase().replace(/[^A-Z0-9-]/g, '');
+    if (cleanCode.startsWith('CMD-')) {
+      return {
+        ok: false,
+        status: 400,
+        error: 'Le suivi s’effectue avec votre code de suivi (ex : FBC-A7K9M2) et non avec le numéro de commande.',
+      };
+    }
+    if (!/^FBC-[A-Z0-9]{4,12}$/.test(cleanCode)) {
+      return { ok: false, status: 400, error: 'Format du code de suivi invalide.' };
+    }
+
+    const snap = await adminDb
+      .collection('orders')
+      .where('trackingCode', '==', cleanCode)
+      .limit(5)
+      .get();
+
+    if (snap.empty) {
+      return { ok: false, status: 404, error: 'Aucune commande trouvée avec ce code de suivi.' };
+    }
+
+    const docSnap = snap.docs[0];
+    const orderData = docSnap.data() as Record<string, unknown>;
+    const existingOwner = typeof orderData.clientAccountId === 'string' ? orderData.clientAccountId : '';
+
+    if (existingOwner && existingOwner !== caller.accountId) {
+      return {
+        ok: false,
+        status: 403,
+        error: 'Accès refusé : cette commande appartient à un autre compte client.',
+      };
+    }
+
+    if (!existingOwner) {
+      const orderPhoneNorm = normalizePhoneServer(String(orderData.customerPhone || ''));
+      if (orderPhoneNorm !== caller.phoneNormalized) {
+        return {
+          ok: false,
+          status: 403,
+          error: 'Accès refusé : ce code de suivi est associé à un autre numéro de téléphone.',
+        };
+      }
+      await docSnap.ref.update({
+        clientAccountId: caller.accountId,
+        updatedAt: FieldValue.serverTimestamp(),
+      });
+      bindOrderFilesToClient(orderData.files, caller.accountId);
+      const updated = { ...orderData, clientAccountId: caller.accountId };
+      return { ok: true, order: serializeFirestoreValue(updated), claimed: true };
+    }
+
+    bindOrderFilesToClient(orderData.files, caller.accountId);
+    return { ok: true, order: serializeFirestoreValue(orderData), claimed: false };
+  }
+
+  // Client session probe
+  app.get('/api/client/session', async (req, res) => {
+    try {
+      const caller = await resolveServerClientCaller(req);
+      if (!caller) {
+        res.json({ authenticated: false });
+        return;
+      }
+      res.json({ authenticated: true, account: caller });
+    } catch (err) {
+      handleServerApiError(res, err, 'Impossible de vérifier votre session client.');
+    }
+  });
+
+  // Client registration
+  app.post('/api/client/register', async (req, res) => {
+    try {
+      if (isClientRateLimited(req, 15)) {
+        res.status(429).json({ error: 'Trop de tentatives. Veuillez patienter quelques minutes.' });
+        return;
+      }
+
+      const { username, fullName, phone, password, claimTrackingCode } = (req.body || {}) as {
+        username?: unknown;
+        fullName?: unknown;
+        phone?: unknown;
+        password?: unknown;
+        claimTrackingCode?: unknown;
+      };
+
+      const userCheck = validateUsername(username);
+      if (!userCheck.valid) {
+        res.status(400).json({ error: userCheck.error });
+        return;
+      }
+
+      const cleanFullName = typeof fullName === 'string' ? fullName.trim() : '';
+      if (cleanFullName.length < 2 || cleanFullName.length > 120) {
+        res.status(400).json({ error: 'Le nom complet doit contenir entre 2 et 120 caractères.' });
+        return;
+      }
+
+      const phoneNorm = normalizePhoneServer(typeof phone === 'string' ? phone : '');
+      if (phoneNorm.length !== 11 || !phoneNorm.startsWith('226')) {
+        res.status(400).json({ error: 'Numéro de téléphone Burkina Faso (+226, 8 chiffres) invalide.' });
+        return;
+      }
+      const formattedPhone = formatNormalizedBurkinaPhone(phoneNorm);
+
+      if (typeof password !== 'string' || password.trim().length < 6 || password.length > 128) {
+        res.status(400).json({ error: 'Le mot de passe doit contenir au moins 6 caractères.' });
+        return;
+      }
+
+      const [existingUserSnap, existingPhoneSnap] = await Promise.all([
+        adminDb.collection('client_accounts').where('usernameLower', '==', userCheck.lower).limit(1).get(),
+        adminDb.collection('client_accounts').where('phoneNormalized', '==', phoneNorm).limit(1).get(),
+      ]);
+
+      if (!existingUserSnap.empty) {
+        res.status(409).json({ error: 'Ce nom d’utilisateur est déjà utilisé.' });
+        return;
+      }
+      if (!existingPhoneSnap.empty) {
+        res.status(409).json({
+          error: 'Un compte client existe déjà avec ce numéro de téléphone. Connectez-vous.',
+        });
+        return;
+      }
+
+      const accountId = `cliacc_${randomIdToken(14)}`;
+      const cleanClaim = typeof claimTrackingCode === 'string' ? claimTrackingCode.trim() : '';
+      if (cleanClaim) {
+        // Verify claim eligibility before creating the account
+        const checkSnap = await adminDb
+          .collection('orders')
+          .where('trackingCode', '==', cleanClaim.toUpperCase().replace(/[^A-Z0-9-]/g, ''))
+          .limit(5)
+          .get();
+        if (checkSnap.empty) {
+          res.status(404).json({ error: 'Le code de suivi indiqué est introuvable.' });
+          return;
+        }
+        const checkOrder = checkSnap.docs[0].data() as Record<string, unknown>;
+        if (typeof checkOrder.clientAccountId === 'string' && checkOrder.clientAccountId) {
+          res.status(403).json({ error: 'Cette commande est déjà rattachée à un compte client.' });
+          return;
+        }
+        if (normalizePhoneServer(String(checkOrder.customerPhone || '')) !== phoneNorm) {
+          res.status(403).json({
+            error: 'Le code de suivi indiqué ne correspond pas à votre numéro de téléphone.',
+          });
+          return;
+        }
+      }
+
+      const { salt, hash } = hashStaffPassword(password);
+      const nowIso = new Date().toISOString();
+      const accountDoc: ClientAccountDoc = {
+        accountId,
+        username: userCheck.clean,
+        usernameLower: userCheck.lower,
+        fullName: cleanFullName,
+        phone: formattedPhone,
+        phoneNormalized: phoneNorm,
+        passwordHash: hash,
+        passwordSalt: salt,
+        mustChangePassword: false,
+        active: true,
+        lastLoginAt: nowIso,
+        createdAt: nowIso,
+        updatedAt: nowIso,
+      };
+
+      await adminDb.collection('client_accounts').doc(accountId).set(accountDoc);
+
+      let claimedOrder: Record<string, unknown> | undefined;
+      if (cleanClaim) {
+        const resClaim = await attachOrVerifyTrackingCode({ accountId, phoneNormalized: phoneNorm }, cleanClaim);
+        if (resClaim.ok && resClaim.order) {
+          claimedOrder = resClaim.order;
+        }
+      }
+
+      const token = signClientToken({
+        accountId,
+        username: accountDoc.username,
+        exp: Date.now() + CLIENT_SESSION_TTL_MS,
+      });
+      setClientSessionCookie(req, res, token);
+
+      res.status(201).json({
+        sessionToken: token,
+        account: toPublicClientAccount(accountDoc),
+        ...(claimedOrder ? { claimedOrder } : {}),
+      });
+    } catch (err) {
+      handleServerApiError(res, err, 'Impossible de créer votre compte client.');
+    }
+  });
+
+  // Client login (Phone OR Username + Password)
+  app.post('/api/client/login', async (req, res) => {
+    try {
+      if (isClientRateLimited(req, 20)) {
+        res.status(429).json({ error: 'Trop de tentatives. Veuillez patienter quelques minutes.' });
+        return;
+      }
+
+      const { identifier, password } = (req.body || {}) as {
+        identifier?: unknown;
+        password?: unknown;
+      };
+      const cleanId = typeof identifier === 'string' ? identifier.trim() : '';
+      if (!cleanId || typeof password !== 'string' || !password) {
+        res.status(400).json({ error: 'Renseignez votre téléphone (ou nom d’utilisateur) et votre mot de passe.' });
+        return;
+      }
+
+      let foundSnap = await adminDb
+        .collection('client_accounts')
+        .where('usernameLower', '==', cleanId.toLowerCase())
+        .limit(1)
+        .get();
+
+      if (foundSnap.empty) {
+        const normPhone = normalizePhoneServer(cleanId);
+        if (normPhone.length === 11 && normPhone.startsWith('226')) {
+          foundSnap = await adminDb
+            .collection('client_accounts')
+            .where('phoneNormalized', '==', normPhone)
+            .limit(1)
+            .get();
+        }
+      }
+
+      if (foundSnap.empty) {
+        res.status(401).json({ error: 'Identifiant ou mot de passe incorrect.' });
+        return;
+      }
+
+      const docSnap = foundSnap.docs[0];
+      const account = docSnap.data() as ClientAccountDoc;
+      if (!account.active) {
+        res.status(403).json({
+          error: 'Ce compte client a été désactivé. Contactez l’atelier FBC Print.',
+        });
+        return;
+      }
+
+      const ok = verifyStaffPassword(password, account.passwordSalt, account.passwordHash);
+      if (!ok) {
+        res.status(401).json({ error: 'Identifiant ou mot de passe incorrect.' });
+        return;
+      }
+
+      const nowIso = new Date().toISOString();
+      await docSnap.ref.update({
+        lastLoginAt: nowIso,
+        updatedAt: nowIso,
+      });
+
+      const token = signClientToken({
+        accountId: account.accountId,
+        username: account.username,
+        exp: Date.now() + CLIENT_SESSION_TTL_MS,
+      });
+      setClientSessionCookie(req, res, token);
+
+      res.json({
+        sessionToken: token,
+        account: toPublicClientAccount({ ...account, lastLoginAt: nowIso }),
+      });
+    } catch (err) {
+      handleServerApiError(res, err, 'Impossible de vous connecter.');
+    }
+  });
+
+  app.post('/api/client/logout', (req, res) => {
+    clearClientSessionCookie(req, res);
+    res.json({ ok: true });
+  });
+
+  app.post('/api/client/change-password', async (req, res) => {
+    try {
+      const caller = await resolveServerClientCaller(req);
+      if (!caller) {
+        res.status(401).json({ error: 'Connexion client requise.' });
+        return;
+      }
+      const { currentPassword, newPassword } = (req.body || {}) as {
+        currentPassword?: unknown;
+        newPassword?: unknown;
+      };
+      if (typeof currentPassword !== 'string' || !currentPassword) {
+        res.status(400).json({ error: 'Saisissez votre mot de passe actuel.' });
+        return;
+      }
+      if (typeof newPassword !== 'string' || newPassword.trim().length < 6 || newPassword.length > 128) {
+        res.status(400).json({ error: 'Le nouveau mot de passe doit contenir au moins 6 caractères.' });
+        return;
+      }
+
+      const docRef = adminDb.collection('client_accounts').doc(caller.accountId);
+      const snap = await docRef.get();
+      if (!snap.exists) {
+        res.status(404).json({ error: 'Compte introuvable.' });
+        return;
+      }
+      const account = snap.data() as ClientAccountDoc;
+      if (!verifyStaffPassword(currentPassword, account.passwordSalt, account.passwordHash)) {
+        res.status(401).json({ error: 'Le mot de passe actuel est incorrect.' });
+        return;
+      }
+
+      const { salt, hash } = hashStaffPassword(newPassword);
+      const nowIso = new Date().toISOString();
+      await docRef.update({
+        passwordHash: hash,
+        passwordSalt: salt,
+        mustChangePassword: false,
+        updatedAt: nowIso,
+      });
+
+      res.json({
+        account: { ...caller, mustChangePassword: false },
+      });
+    } catch (err) {
+      handleServerApiError(res, err, 'Impossible de modifier votre mot de passe.');
+    }
+  });
+
+  // Client orders list (strictly isolated to caller.accountId)
+  app.get('/api/client/orders', async (req, res) => {
+    try {
+      const caller = await resolveServerClientCaller(req);
+      if (!caller) {
+        res.status(401).json({ error: 'Connexion client requise.' });
+        return;
+      }
+      const snap = await adminDb
+        .collection('orders')
+        .where('clientAccountId', '==', caller.accountId)
+        .get();
+
+      const orders = snap.docs
+        .map((d) => serializeFirestoreValue(d.data()) as Record<string, unknown>)
+        .sort((a, b) =>
+          String(b.createdAt || b.createdAtIso || '').localeCompare(
+            String(a.createdAt || a.createdAtIso || '')
+          )
+        );
+      res.json({ orders });
+    } catch (err) {
+      handleServerApiError(res, err, 'Impossible de charger vos commandes.');
+    }
+  });
+
+  // Attach an unowned/manual order by trackingCode (phone must match caller)
+  app.post('/api/client/claim-order', async (req, res) => {
+    try {
+      if (isClientRateLimited(req, 20)) {
+        res.status(429).json({ error: 'Trop de tentatives. Veuillez patienter quelques minutes.' });
+        return;
+      }
+      const caller = await resolveServerClientCaller(req);
+      if (!caller) {
+        res.status(401).json({ error: 'Connexion client requise.' });
+        return;
+      }
+      const { trackingCode } = (req.body || {}) as { trackingCode?: unknown };
+      if (typeof trackingCode !== 'string' || !trackingCode.trim()) {
+        res.status(400).json({ error: 'Code de suivi requis.' });
+        return;
+      }
+
+      const result = await attachOrVerifyTrackingCode(caller, trackingCode);
+      if (!result.ok) {
+        res.status(result.status || 400).json({ error: result.error });
+        return;
+      }
+      res.json({ order: result.order, claimed: Boolean(result.claimed) });
+    } catch (err) {
+      handleServerApiError(res, err, 'Impossible de rattacher cette commande.');
+    }
+  });
+
+  // Open a shared tracking link (?code=FBC-...) strictly for the authenticated owning client
+  app.post('/api/client/orders/open-link', async (req, res) => {
+    try {
+      if (isClientRateLimited(req, 25)) {
+        res.status(429).json({ error: 'Trop de tentatives. Veuillez patienter quelques minutes.' });
+        return;
+      }
+      const caller = await resolveServerClientCaller(req);
+      if (!caller) {
+        res.status(401).json({ error: 'Connexion client requise pour consulter cette commande.' });
+        return;
+      }
+      const { trackingCode } = (req.body || {}) as { trackingCode?: unknown };
+      if (typeof trackingCode !== 'string' || !trackingCode.trim()) {
+        res.status(400).json({ error: 'Code de suivi requis.' });
+        return;
+      }
+
+      const result = await attachOrVerifyTrackingCode(caller, trackingCode);
+      if (!result.ok) {
+        res.status(result.status || 400).json({ error: result.error });
+        return;
+      }
+      res.json({ order: result.order, claimed: Boolean(result.claimed) });
+    } catch (err) {
+      handleServerApiError(res, err, 'Impossible d’ouvrir ce lien de commande.');
+    }
+  });
+
+  // Authenticated client creates an order
+  app.post('/api/client/orders', async (req, res) => {
+    try {
+      const caller = await resolveServerClientCaller(req);
+      if (!caller) {
+        res.status(401).json({ error: 'Connexion client requise pour valider votre commande.' });
+        return;
+      }
+
+      const payload = (req.body || {}) as Record<string, unknown>;
+      if (!Array.isArray(payload.items) || payload.items.length === 0) {
+        res.status(400).json({ error: 'La commande doit contenir au moins une prestation.' });
+        return;
+      }
+      if (!payload.acceptedTerms) {
+        res.status(400).json({ error: 'Veuillez accepter les conditions de commande.' });
+        return;
+      }
+
+      const filesList = Array.isArray(payload.files) ? payload.files : [];
+      for (const f of filesList) {
+        const fid = f && typeof f === 'object' ? (f as { fileId?: unknown }).fileId : null;
+        if (typeof fid === 'string' && uploadsIndex[fid]) {
+          const owner = uploadsIndex[fid].ownerClientAccountId;
+          if (owner && owner !== caller.accountId) {
+            res.status(403).json({ error: 'Fichier associé à un autre compte client.' });
+            return;
+          }
+        }
+      }
+
+      const year = new Date().getFullYear();
+      const counterRef = adminDb.collection('counters').doc('orders');
+      const seq = await adminDb.runTransaction(async (tx) => {
+        const snap = await tx.get(counterRef);
+        const current = snap.exists
+          ? (snap.data() as { lastOrderSeq: number; lastQuoteSeq: number; lastReceiptSeq: number })
+          : { lastOrderSeq: 41, lastQuoteSeq: 41, lastReceiptSeq: 12 };
+        const nextOrder = (current.lastOrderSeq || 0) + 1;
+        const nextQuote = (current.lastQuoteSeq || 0) + 1;
+        tx.set(counterRef, {
+          lastOrderSeq: nextOrder,
+          lastQuoteSeq: nextQuote,
+          lastReceiptSeq: current.lastReceiptSeq || 0,
+        });
+        return { nextOrder, nextQuote };
+      });
+
+      const orderNumber = `CMD-${year}-${String(seq.nextOrder).padStart(4, '0')}`;
+      const quoteNumber = `DEV-${year}-${String(seq.nextQuote).padStart(4, '0')}`;
+      const trackingCode = `FBC-${randomAlphaNum(6)}`;
+      const orderId = `ord_${randomIdToken(16)}`;
+      const nowIso = new Date().toISOString();
+
+      const customerName =
+        typeof payload.customerName === 'string' && payload.customerName.trim().length >= 2
+          ? payload.customerName.trim().slice(0, 120)
+          : caller.fullName;
+      const customerPhone =
+        typeof payload.customerPhone === 'string' && normalizePhoneServer(payload.customerPhone).length === 11
+          ? formatNormalizedBurkinaPhone(normalizePhoneServer(payload.customerPhone))
+          : caller.phone;
+
+      const orderDoc = sanitizeServerFirestore({
+        ...payload,
+        orderId,
+        orderNumber,
+        quoteNumber,
+        trackingCode,
+        clientAccountId: caller.accountId,
+        customerName,
+        customerPhone,
+        paymentIds: [],
+        status: 'recue',
+        paymentStatus: 'non_paye',
+        paidAmount: 0,
+        discountAmount: 0,
+        statusHistory: [
+          {
+            status: 'recue',
+            label: 'Reçue',
+            actor: customerName,
+            note: 'Commande enregistrée',
+            timestamp: nowIso,
+          },
+        ],
+        source: 'web',
+        createdAt: FieldValue.serverTimestamp(),
+        updatedAt: FieldValue.serverTimestamp(),
+      });
+
+      const lookupKey = buildLookupKeyServer(trackingCode, customerPhone);
+      await adminDb.runTransaction(async (tx) => {
+        tx.set(adminDb.collection('orders').doc(orderId), orderDoc);
+        tx.set(adminDb.collection('order_lookups').doc(lookupKey), {
+          orderId,
+          orderNumber,
+          createdAt: FieldValue.serverTimestamp(),
+        });
+      });
+
+      bindOrderFilesToClient(filesList, caller.accountId);
+
+      res.status(201).json({
+        order: serializeFirestoreValue({
+          ...orderDoc,
+          createdAt: nowIso,
+          updatedAt: nowIso,
+          createdAtIso: nowIso,
+        }),
+      });
+    } catch (err) {
+      handleServerApiError(res, err, 'Impossible d’enregistrer votre commande.');
+    }
+  });
+
+  // Authenticated client declares a payment on their own order
+  app.post('/api/client/orders/:orderId/payments', async (req, res) => {
+    try {
+      const caller = await resolveServerClientCaller(req);
+      if (!caller) {
+        res.status(401).json({ error: 'Connexion client requise.' });
+        return;
+      }
+
+      const orderRef = adminDb.collection('orders').doc(req.params.orderId);
+      const orderSnap = await orderRef.get();
+      if (!orderSnap.exists) {
+        res.status(404).json({ error: 'Commande introuvable.' });
+        return;
+      }
+      const orderData = orderSnap.data() as Record<string, unknown>;
+      if (orderData.clientAccountId !== caller.accountId) {
+        res.status(403).json({ error: 'Accès refusé à cette commande.' });
+        return;
+      }
+
+      const {
+        methodId,
+        methodName,
+        depositPhone,
+        transactionRef,
+        declaredAmount,
+        paymentType,
+        screenshotFileId,
+        screenshotPreviewUrl,
+      } = (req.body || {}) as {
+        methodId?: string;
+        methodName?: string;
+        depositPhone?: string;
+        transactionRef?: string;
+        declaredAmount?: number;
+        paymentType?: 'acompte' | 'integral' | 'solde';
+        screenshotFileId?: string;
+        screenshotPreviewUrl?: string;
+      };
+
+      if (!methodId || !methodName || !depositPhone || typeof declaredAmount !== 'number' || declaredAmount <= 0) {
+        res.status(400).json({ error: 'Informations de paiement invalides.' });
+        return;
+      }
+      if (paymentType !== 'acompte' && paymentType !== 'integral' && paymentType !== 'solde') {
+        res.status(400).json({ error: 'Type de paiement invalide.' });
+        return;
+      }
+
+      if (screenshotFileId && uploadsIndex[screenshotFileId]) {
+        const owner = uploadsIndex[screenshotFileId].ownerClientAccountId;
+        if (owner && owner !== caller.accountId) {
+          res.status(403).json({ error: 'Capture de paiement invalide.' });
+          return;
+        }
+        if (!owner) {
+          uploadsIndex[screenshotFileId].ownerClientAccountId = caller.accountId;
+          saveIndex(uploadsIndex);
+        }
+      }
+
+      const paymentId = `pay_${randomIdToken(14)}`;
+      const nowIso = new Date().toISOString();
+
+      const paymentDoc = sanitizeServerFirestore({
+        paymentId,
+        orderId: String(orderData.orderId),
+        orderNumber: String(orderData.orderNumber),
+        customerName: String(orderData.customerName),
+        methodId,
+        methodName,
+        depositPhone: depositPhone.trim(),
+        transactionRef: (transactionRef || '').trim(),
+        declaredAmount,
+        paymentType,
+        screenshotFileId: screenshotFileId || '',
+        screenshotPreviewUrl: screenshotPreviewUrl || '',
+        status: 'en_attente_validation',
+        createdAt: FieldValue.serverTimestamp(),
+      });
+
+      const prevHistory = Array.isArray(orderData.statusHistory) ? orderData.statusHistory : [];
+      const nextHistory = [
+        ...prevHistory,
+        {
+          status: orderData.status || 'recue',
+          label: 'Paiement déclaré',
+          actor: String(orderData.customerName),
+          note: `${methodName} · ${declaredAmount} FCFA`,
+          timestamp: nowIso,
+        },
+      ];
+      const prevPaymentIds = Array.isArray(orderData.paymentIds)
+        ? (orderData.paymentIds as string[])
+        : [];
+      const nextPaymentIds = [...prevPaymentIds, paymentId].slice(-20);
+
+      const latestPayment = {
+        paymentId,
+        methodName,
+        depositPhone: depositPhone.trim(),
+        transactionRef: (transactionRef || '').trim(),
+        declaredAmount,
+        paymentType,
+        status: 'en_attente_validation',
+        createdAt: nowIso,
+      };
+
+      await adminDb.collection('payments').doc(paymentId).set(paymentDoc);
+      await orderRef.update(
+        sanitizeServerFirestore({
+          paymentStatus: 'en_attente_validation',
+          paymentIds: nextPaymentIds,
+          latestPayment,
+          statusHistory: nextHistory,
+          updatedAt: FieldValue.serverTimestamp(),
+        })
+      );
+
+      const updatedOrderSnap = await orderRef.get();
+      res.status(201).json({
+        payment: serializeFirestoreValue({ ...paymentDoc, createdAt: nowIso }),
+        order: serializeFirestoreValue(updatedOrderSnap.data()),
+      });
+    } catch (err) {
+      handleServerApiError(res, err, 'Impossible d’enregistrer cette déclaration de paiement.');
+    }
+  });
+
+  // Authenticated client re-uploads a corrected file on their own order
+  app.post('/api/client/orders/:orderId/reupload', async (req, res) => {
+    try {
+      const caller = await resolveServerClientCaller(req);
+      if (!caller) {
+        res.status(401).json({ error: 'Connexion client requise.' });
+        return;
+      }
+
+      const orderRef = adminDb.collection('orders').doc(req.params.orderId);
+      const orderSnap = await orderRef.get();
+      if (!orderSnap.exists) {
+        res.status(404).json({ error: 'Commande introuvable.' });
+        return;
+      }
+      const orderData = orderSnap.data() as Record<string, unknown>;
+      if (orderData.clientAccountId !== caller.accountId) {
+        res.status(403).json({ error: 'Accès refusé à cette commande.' });
+        return;
+      }
+
+      const { oldFileId, newFile } = (req.body || {}) as {
+        oldFileId?: string;
+        newFile?: Record<string, unknown>;
+      };
+      if (!oldFileId || !newFile || typeof newFile.fileId !== 'string') {
+        res.status(400).json({ error: 'Nouveau fichier manquant.' });
+        return;
+      }
+
+      if (uploadsIndex[newFile.fileId]) {
+        const owner = uploadsIndex[newFile.fileId].ownerClientAccountId;
+        if (owner && owner !== caller.accountId) {
+          res.status(403).json({ error: 'Fichier invalide.' });
+          return;
+        }
+        if (!owner) {
+          uploadsIndex[newFile.fileId].ownerClientAccountId = caller.accountId;
+          saveIndex(uploadsIndex);
+        }
+      }
+
+      const nowIso = new Date().toISOString();
+      const prevFiles = Array.isArray(orderData.files)
+        ? (orderData.files as Array<Record<string, unknown>>)
+        : [];
+      const updatedFiles = prevFiles.map((f) =>
+        f.fileId === oldFileId ? { ...f, replaced: true } : f
+      );
+      updatedFiles.push(newFile);
+
+      const prevHistory = Array.isArray(orderData.statusHistory) ? orderData.statusHistory : [];
+      const nextHistory = [
+        ...prevHistory,
+        {
+          status: 'en_verification',
+          label: 'En vérification',
+          actor: String(orderData.customerName),
+          note: `Nouveau fichier renvoyé : ${String(newFile.originalName || '')} (v${String(newFile.version || 2)})`,
+          timestamp: nowIso,
+        },
+      ];
+
+      await orderRef.update(
+        sanitizeServerFirestore({
+          files: updatedFiles,
+          status: 'en_verification',
+          statusHistory: nextHistory,
+          updatedAt: FieldValue.serverTimestamp(),
+        })
+      );
+
+      const updatedSnap = await orderRef.get();
+      res.json({ order: serializeFirestoreValue(updatedSnap.data()) });
+    } catch (err) {
+      handleServerApiError(res, err, 'Impossible de transmettre le fichier corrigé.');
+    }
+  });
+
+  // Staff / Admin: list registered client accounts + order counts (never exposes hashes/salts)
+  app.get('/api/admin/client-accounts', async (req, res) => {
+    try {
+      const caller = await resolveServerStaffCaller(req);
+      if (!caller) {
+        res.status(401).json({ error: 'Authentification atelier requise.' });
+        return;
+      }
+
+      const [accountsSnap, ordersSnap] = await Promise.all([
+        adminDb.collection('client_accounts').get(),
+        adminDb.collection('orders').get(),
+      ]);
+
+      const countsByAccount = new Map<string, number>();
+      for (const d of ordersSnap.docs) {
+        const cid = (d.data() as { clientAccountId?: string }).clientAccountId;
+        if (cid) {
+          countsByAccount.set(cid, (countsByAccount.get(cid) || 0) + 1);
+        }
+      }
+
+      const accounts = accountsSnap.docs
+        .map((d) => {
+          const data = d.data() as ClientAccountDoc;
+          return {
+            ...toPublicClientAccount(data),
+            ordersCount: countsByAccount.get(data.accountId) || 0,
+          };
+        })
+        .sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
+
+      res.json({ accounts });
+    } catch (err) {
+      handleServerApiError(res, err, 'Impossible de charger les comptes clients.');
+    }
+  });
+
+  // Admin-only: reset a client account password (sets temporary password + mustChangePassword)
+  app.post('/api/admin/client-accounts/:accountId/reset-password', async (req, res) => {
+    try {
+      const caller = await resolveServerStaffCaller(req);
+      if (!caller || caller.actorRole !== 'admin') {
+        res.status(403).json({ error: 'Accès réservé à l’administrateur principal.' });
+        return;
+      }
+
+      const { accountId } = req.params;
+      const { newPassword } = (req.body || {}) as { newPassword?: string };
+      const tempPassword =
+        typeof newPassword === 'string' && newPassword.trim().length >= 6
+          ? newPassword.trim()
+          : `FBC-${randomAlphaNum(6)}`;
+
+      if (tempPassword.length > 128) {
+        res.status(400).json({ error: 'Mot de passe trop long.' });
+        return;
+      }
+
+      const docRef = adminDb.collection('client_accounts').doc(accountId);
+      const snap = await docRef.get();
+      if (!snap.exists) {
+        res.status(404).json({ error: 'Compte client introuvable.' });
+        return;
+      }
+      const account = snap.data() as ClientAccountDoc;
+      const { salt, hash } = hashStaffPassword(tempPassword);
+      const nowIso = new Date().toISOString();
+
+      await docRef.update({
+        passwordHash: hash,
+        passwordSalt: salt,
+        mustChangePassword: true,
+        updatedAt: nowIso,
+      });
+
+      await writeServerAuditLog({
+        action: 'Réinitialisation mot de passe client',
+        targetType: 'client_account',
+        targetId: accountId,
+        actorEmail: caller.actorEmail,
+        actorRole: 'admin',
+        details: `@${account.username} (${account.phone})`,
+      });
+
+      res.json({
+        ok: true,
+        temporaryPassword: tempPassword,
+        account: toPublicClientAccount({ ...account, mustChangePassword: true }),
+      });
+    } catch (err) {
+      handleServerApiError(res, err, 'Impossible de réinitialiser le mot de passe client.');
+    }
+  });
+
+  // Admin-only: activate or deactivate a client account
+  app.patch('/api/admin/client-accounts/:accountId', async (req, res) => {
+    try {
+      const caller = await resolveServerStaffCaller(req);
+      if (!caller || caller.actorRole !== 'admin') {
+        res.status(403).json({ error: 'Accès réservé à l’administrateur principal.' });
+        return;
+      }
+      const { accountId } = req.params;
+      const { active } = (req.body || {}) as { active?: boolean };
+      if (typeof active !== 'boolean') {
+        res.status(400).json({ error: 'Statut actif invalide.' });
+        return;
+      }
+      const docRef = adminDb.collection('client_accounts').doc(accountId);
+      const snap = await docRef.get();
+      if (!snap.exists) {
+        res.status(404).json({ error: 'Compte client introuvable.' });
+        return;
+      }
+      const account = snap.data() as ClientAccountDoc;
+      await docRef.update({ active, updatedAt: new Date().toISOString() });
+
+      await writeServerAuditLog({
+        action: active ? 'Réactivation compte client' : 'Désactivation compte client',
+        targetType: 'client_account',
+        targetId: accountId,
+        actorEmail: caller.actorEmail,
+        actorRole: 'admin',
+        details: `@${account.username} (${account.phone})`,
+      });
+
+      res.json({
+        ok: true,
+        account: toPublicClientAccount({ ...account, active }),
+      });
+    } catch (err) {
+      handleServerApiError(res, err, 'Impossible de modifier ce compte client.');
+    }
+  });
+
+  // Legacy unauthenticated lookup endpoint disabled: require client account login
+  app.post('/api/orders/lookup', (_req, res) => {
+    res.status(401).json({
+      requiresAuth: true,
+      error: 'Par sécurité, veuillez vous connecter à votre compte client (téléphone ou nom d’utilisateur et mot de passe) pour consulter vos commandes.',
+    });
   });
 
   // Block direct access to internal server-views and legacy admin paths

@@ -110,12 +110,13 @@ service cloud.firestore {
 
     function isValidOrder(data) {
       return data.keys().hasAll(['orderId', 'orderNumber', 'trackingCode', 'quoteNumber', 'customerName', 'customerPhone', 'status', 'paymentStatus', 'totalAmount', 'items', 'files', 'statusHistory', 'acceptedTerms', 'createdAt', 'updatedAt'])
-        && data.keys().hasOnly(['orderId', 'orderNumber', 'trackingCode', 'quoteNumber', 'receiptNumber', 'customerName', 'customerPhone', 'isWhatsapp', 'wantsDelivery', 'deliveryZoneId', 'deliveryZoneName', 'deliveryAddress', 'deliveryFee', 'urgent', 'urgentFee', 'discountAmount', 'subtotal', 'totalAmount', 'depositRequiredAmount', 'paidAmount', 'status', 'paymentStatus', 'paymentRejectionReason', 'correctionRequestMessage', 'cancellationReason', 'promisedDeliveryDate', 'internalNotes', 'acceptedTerms', 'quoteValidUntil', 'items', 'files', 'statusHistory', 'paymentIds', 'latestPayment', 'source', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['orderId', 'orderNumber', 'trackingCode', 'quoteNumber', 'receiptNumber', 'clientAccountId', 'customerName', 'customerPhone', 'isWhatsapp', 'wantsDelivery', 'deliveryZoneId', 'deliveryZoneName', 'deliveryAddress', 'deliveryFee', 'urgent', 'urgentFee', 'discountAmount', 'subtotal', 'totalAmount', 'depositRequiredAmount', 'paidAmount', 'status', 'paymentStatus', 'paymentRejectionReason', 'correctionRequestMessage', 'cancellationReason', 'promisedDeliveryDate', 'internalNotes', 'acceptedTerms', 'quoteValidUntil', 'items', 'files', 'statusHistory', 'paymentIds', 'latestPayment', 'source', 'createdAt', 'updatedAt'])
         && isValidId(data.orderId)
         && data.orderNumber is string && data.orderNumber.size() >= 3 && data.orderNumber.size() <= 40
         && data.trackingCode is string && data.trackingCode.size() >= 4 && data.trackingCode.size() <= 40
         && data.quoteNumber is string && data.quoteNumber.size() >= 3 && data.quoteNumber.size() <= 40
         && (!('receiptNumber' in data) || (data.receiptNumber is string && data.receiptNumber.size() <= 40))
+        && (!('clientAccountId' in data) || isValidId(data.clientAccountId))
         && data.customerName is string && data.customerName.size() >= 2 && data.customerName.size() <= 120
         && data.customerPhone is string && data.customerPhone.size() >= 6 && data.customerPhone.size() <= 30
         && (!('isWhatsapp' in data) || data.isWhatsapp is bool)
@@ -264,88 +265,76 @@ service cloud.firestore {
       allow delete: if isAdmin() && isValidId(methodId);
     }
 
-    // Orders: single get by unguessable orderId or staff, list strictly staff-only
+    // Orders: strictly staff via Client SDK; authenticated clients access their own orders via /api/client/*
     match /orders/{orderId} {
-      allow get: if isValidId(orderId);
+      allow get: if isSignedIn() && isValidId(orderId) && isAdminOrOperator();
       allow list: if isAdminOrOperator();
-      allow create: if isValidId(orderId)
+      allow create: if isSignedIn()
+        && isValidId(orderId)
         && isValidOrder(incoming())
         && incoming().orderId == orderId
         && incoming().createdAt == request.time
         && incoming().updatedAt == request.time
-        && (
-          isAdminOrOperator() || (
-            incoming().status == 'recue'
-            && incoming().paymentStatus == 'non_paye'
-            && incoming().acceptedTerms == true
-            && (!('paidAmount' in incoming()) || incoming().paidAmount == 0)
-            && (!('discountAmount' in incoming()) || incoming().discountAmount == 0)
-            && (!('source' in incoming()) || incoming().source == 'web')
-          )
-        );
-      allow update: if isValidId(orderId)
+        && isAdminOrOperator();
+      allow update: if isSignedIn()
+        && isValidId(orderId)
         && isValidOrder(incoming())
         && incoming().orderId == existing().orderId
         && incoming().orderNumber == existing().orderNumber
         && incoming().createdAt == existing().createdAt
         && incoming().updatedAt == request.time
         && incoming().statusHistory.size() >= existing().statusHistory.size()
-        && (
-          isAdminOrOperator() || (
-            // Client Action 1: Declare payment (only allowed when not cancelled)
-            (
-              existing().status != 'annulee'
-              && incoming().diff(existing()).affectedKeys().hasOnly(['paymentStatus', 'paymentIds', 'latestPayment', 'statusHistory', 'updatedAt'])
-              && incoming().paymentStatus == 'en_attente_validation'
-            ) ||
-            // Client Action 2: Re-upload corrected file when requested
-            (
-              existing().status == 'fichier_a_corriger'
-              && incoming().diff(existing()).affectedKeys().hasOnly(['files', 'status', 'statusHistory', 'updatedAt'])
-              && incoming().status == 'en_verification'
-            )
-          )
-        );
-      allow delete: if isAdmin() && isValidId(orderId);
+        && isAdminOrOperator();
+      allow delete: if isSignedIn() && isValidId(orderId) && isAdmin();
     }
 
-    // Order Lookups: exact key get only, no list
+    // Order Lookups: staff/server only
     match /order_lookups/{lookupKey} {
-      allow get: if isValidId(lookupKey);
+      allow get: if isSignedIn() && isValidId(lookupKey) && isAdminOrOperator();
       allow list: if false;
-      allow create: if isValidId(lookupKey)
+      allow create: if isSignedIn()
+        && isValidId(lookupKey)
         && isValidOrderLookup(incoming())
         && incoming().createdAt == request.time
+        && isAdminOrOperator()
         && existsAfter(/databases/$(database)/documents/orders/$(incoming().orderId));
-      allow update, delete: if isAdmin() && isValidId(lookupKey);
+      allow update, delete: if isSignedIn() && isValidId(lookupKey) && isAdmin();
     }
 
-    // Payments: staff can list/validate/reject; clients can create for an existing order & get by paymentId
+    // Payments: strictly staff via Client SDK; authenticated clients declare payments via /api/client/*
     match /payments/{paymentId} {
-      allow get: if isValidId(paymentId);
+      allow get: if isSignedIn() && isValidId(paymentId) && isAdminOrOperator();
       allow list: if isAdminOrOperator();
-      allow create: if isValidId(paymentId)
+      allow create: if isSignedIn()
+        && isValidId(paymentId)
         && isValidPayment(incoming())
         && incoming().paymentId == paymentId
-        && incoming().status == 'en_attente_validation'
         && incoming().createdAt == request.time
+        && isAdminOrOperator()
         && exists(/databases/$(database)/documents/orders/$(incoming().orderId));
-      allow update: if isAdminOrOperator()
+      allow update: if isSignedIn()
         && isValidId(paymentId)
         && isValidPayment(incoming())
         && incoming().paymentId == existing().paymentId
         && incoming().orderId == existing().orderId
         && incoming().createdAt == existing().createdAt
-        && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'rejectionReason', 'validatedByEmail', 'validatedAt']);
+        && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'rejectionReason', 'validatedByEmail', 'validatedAt'])
+        && isAdminOrOperator();
       allow delete: if false;
     }
 
     // Clients CRM: strictly staff only
     match /clients/{clientId} {
-      allow get, list: if isAdminOrOperator();
-      allow create: if isAdminOrOperator() && isValidId(clientId) && isValidClientProfile(incoming()) && incoming().createdAt == request.time;
-      allow update: if isAdminOrOperator() && isValidId(clientId) && isValidClientProfile(incoming()) && incoming().createdAt == existing().createdAt;
-      allow delete: if isAdmin() && isValidId(clientId);
+      allow get: if isSignedIn() && isValidId(clientId) && isAdminOrOperator();
+      allow list: if isAdminOrOperator();
+      allow create: if isSignedIn() && isValidId(clientId) && isValidClientProfile(incoming()) && incoming().createdAt == request.time && isAdminOrOperator();
+      allow update: if isSignedIn() && isValidId(clientId) && isValidClientProfile(incoming()) && incoming().createdAt == existing().createdAt && isAdminOrOperator();
+      allow delete: if isSignedIn() && isValidId(clientId) && isAdmin();
+    }
+
+    // Client Accounts (username, phone, scrypt password hash/salt): strictly server-side only
+    match /client_accounts/{accountId} {
+      allow read, write: if false;
     }
 
     // Admin Users: role-based access
@@ -406,13 +395,15 @@ service cloud.firestore {
       allow update, delete: if false;
     }
 
-    // Counters: sequential document & order numbering
+    // Counters: sequential document & order numbering (staff / server only)
     match /counters/{counterId} {
-      allow get: if isValidId(counterId);
+      allow get: if isSignedIn() && isValidId(counterId) && isAdminOrOperator();
       allow list: if false;
-      allow create: if isValidId(counterId) && isValidCounter(incoming());
-      allow update: if isValidId(counterId)
+      allow create: if isSignedIn() && isValidId(counterId) && isValidCounter(incoming()) && isAdminOrOperator();
+      allow update: if isSignedIn()
+        && isValidId(counterId)
         && isValidCounter(incoming())
+        && isAdminOrOperator()
         && incoming().lastOrderSeq >= existing().lastOrderSeq
         && incoming().lastOrderSeq <= existing().lastOrderSeq + 10
         && incoming().lastQuoteSeq >= existing().lastQuoteSeq

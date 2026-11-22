@@ -1,15 +1,18 @@
 import React from 'react';
+import type { ClientAccountPublic } from '../types/fbc';
 
-export type AppView = 'home' | 'order' | 'track';
+export type AppView = 'home' | 'order' | 'track' | 'account';
 
 interface HeaderProps {
   currentView: AppView;
+  clientAccount?: ClientAccountPublic | null;
   onNavigate: (view: AppView) => void;
   onStartOrder: () => void;
 }
 
 export const Header: React.FC<HeaderProps> = ({
   currentView,
+  clientAccount,
   onNavigate,
   onStartOrder,
 }) => {
@@ -17,6 +20,7 @@ export const Header: React.FC<HeaderProps> = ({
     { id: 'home', label: 'Accueil' },
     { id: 'order', label: 'Commander' },
     { id: 'track', label: 'Suivi' },
+    { id: 'account', label: 'Mes commandes' },
   ];
 
   return (
@@ -44,7 +48,7 @@ export const Header: React.FC<HeaderProps> = ({
         {/* Zone 2: Concise single-line navigation links */}
         <nav
           aria-label="Navigation principale"
-          className="flex items-center gap-3 sm:gap-7 min-w-0 overflow-x-auto no-scrollbar"
+          className="flex items-center gap-3 sm:gap-6 min-w-0 overflow-x-auto no-scrollbar"
         >
           {navItems.map((item) => {
             const active = currentView === item.id;
@@ -53,12 +57,18 @@ export const Header: React.FC<HeaderProps> = ({
                 key={item.id}
                 type="button"
                 onClick={() => onNavigate(item.id)}
-                className={`text-[13px] sm:text-base font-medium whitespace-nowrap shrink-0 py-2 border-b-2 transition-colors min-h-[44px] flex items-center ${
+                className={`text-[13px] sm:text-base font-medium whitespace-nowrap shrink-0 py-2 border-b-2 transition-colors min-h-[44px] flex items-center gap-1.5 ${
                   active
                     ? 'text-[#26547C] border-[#119DA4]'
                     : 'text-slate-600 border-transparent hover:text-[#26547C]'
                 }`}
               >
+                {item.id === 'account' && clientAccount && (
+                  <span
+                    className="w-2 h-2 rounded-full bg-[#2E9E6B] shrink-0"
+                    aria-hidden="true"
+                  />
+                )}
                 {item.label}
               </button>
             );
@@ -70,7 +80,7 @@ export const Header: React.FC<HeaderProps> = ({
           <button
             type="button"
             onClick={onStartOrder}
-            className="px-3.5 sm:px-6 py-2 sm:py-2.5 rounded-full bg-[#EF233C] text-white text-xs sm:text-sm font-semibold hover:bg-[#d81b32] active:scale-[0.98] transition-all whitespace-nowrap shrink-0 min-h-[40px] sm:min-h-[44px] shadow-sm"
+            className="px-3 sm:px-5 py-2 sm:py-2.5 rounded-full bg-[#EF233C] text-white text-xs sm:text-sm font-semibold hover:bg-[#d81b32] active:scale-[0.98] transition-all whitespace-nowrap shrink-0 min-h-[40px] sm:min-h-[44px] shadow-sm"
           >
             <span className="sm:hidden">+ Commande</span>
             <span className="hidden sm:inline">Passer ma commande</span>

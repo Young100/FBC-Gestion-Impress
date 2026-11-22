@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react';
 import { ExternalLink, ShieldCheck } from 'lucide-react';
 import { DEFAULT_PAYMENT_METHODS, DEFAULT_SERVICES, DEFAULT_SETTINGS } from './data/defaults';
+import { createManualOrderServer } from './lib/adminApi';
+import { auth } from './lib/firebase';
 import { createOrderInFirestore, subscribePublicCatalog } from './lib/firestoreApi';
 import type { Order, PaymentMethod, PrintService, ShopSettings } from './types/fbc';
 import { AdminSpace } from './components/AdminSpace';
@@ -26,7 +28,8 @@ export default function AdminApp() {
       const validUntil = new Date();
       validUntil.setDate(validUntil.getDate() + (settings.quoteValidityDays || 15));
 
-      const duplicated = await createOrderInFirestore({
+      const reprintPayload = {
+        ...(order.clientAccountId ? { clientAccountId: order.clientAccountId } : {}),
         customerName: order.customerName,
         customerPhone: order.customerPhone,
         isWhatsapp: order.isWhatsapp,
@@ -46,19 +49,23 @@ export default function AdminApp() {
             100
         ),
         paidAmount: 0,
-        status: 'recue',
-        paymentStatus: 'non_paye',
+        status: 'recue' as const,
+        paymentStatus: 'non_paye' as const,
         acceptedTerms: true,
         quoteValidUntil: validUntil.toISOString(),
         internalNotes: `Réimpression de la commande ${order.orderNumber}`,
         items: order.items,
         files: order.files.filter((f) => !f.replaced),
         statusHistory: [],
-        source: 'manual_admin',
-      });
+        source: 'manual_admin' as const,
+      };
+
+      const createdNum = auth.currentUser
+        ? (await createOrderInFirestore(reprintPayload)).orderNumber
+        : (await createManualOrderServer(reprintPayload)).orderNumber;
 
       setReprintNotice(
-        `Réimpression créée avec succès : ${duplicated.orderNumber} (${duplicated.customerName})`
+        `Réimpression créée avec succès : ${createdNum} (${order.customerName})`
       );
       setTimeout(() => setReprintNotice(null), 6000);
     } catch (err) {

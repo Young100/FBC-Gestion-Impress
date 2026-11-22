@@ -13,24 +13,27 @@ import {
 } from 'lucide-react';
 import { getServiceImageSrc, SERVICE_IMAGES } from '../data/defaults';
 import { formatFcfa } from '../lib/pricing';
-import type { PrintService, ShopSettings } from '../types/fbc';
+import type { ClientAccountPublic, PrintService, ShopSettings } from '../types/fbc';
 import { PWAInstallButton } from './PWAInstallButton';
 
 interface LandingHeroProps {
   services: PrintService[];
   settings: ShopSettings;
+  clientAccount: ClientAccountPublic | null;
   onStartOrder: (preselectedServiceId?: string) => void;
-  onTrackLookup: (orderNumber: string, phone: string) => Promise<string | null>;
+  onQuickTrackCode: (trackingCode: string) => Promise<string | null>;
+  onGoToAccount: () => void;
 }
 
 export const LandingHero: React.FC<LandingHeroProps> = ({
   services,
   settings,
+  clientAccount,
   onStartOrder,
-  onTrackLookup,
+  onQuickTrackCode,
+  onGoToAccount,
 }) => {
-  const [orderNum, setOrderNum] = useState('');
-  const [phone, setPhone] = useState('');
+  const [trackingCode, setTrackingCode] = useState('');
   const [lookupError, setLookupError] = useState<string | null>(null);
   const [searching, setSearching] = useState(false);
 
@@ -39,13 +42,20 @@ export const LandingHero: React.FC<LandingHeroProps> = ({
   const handleSearchSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setLookupError(null);
-    if (!orderNum.trim() || !phone.trim()) {
-      setLookupError('Veuillez saisir votre numéro de commande et votre téléphone.');
+    const trimmedCode = trackingCode.trim().toUpperCase();
+    if (!trimmedCode) {
+      setLookupError('Veuillez saisir votre code de suivi (ex : FBC-A7K9M2).');
+      return;
+    }
+    if (trimmedCode.startsWith('CMD-')) {
+      setLookupError(
+        'Le suivi s’effectue avec votre code de suivi (ex : FBC-A7K9M2) et non avec le numéro de commande.'
+      );
       return;
     }
     setSearching(true);
     try {
-      const err = await onTrackLookup(orderNum, phone);
+      const err = await onQuickTrackCode(trimmedCode);
       if (err) setLookupError(err);
     } finally {
       setSearching(false);
@@ -150,59 +160,49 @@ export const LandingHero: React.FC<LandingHeroProps> = ({
                 Suivre une commande existante
               </h2>
               <p className="text-sm text-slate-600">
-                Consultez l’avancement, téléchargez votre devis ou reçu, ou déclarez un
-                paiement Mobile Money.
+                {clientAccount
+                  ? `Connecté (@${clientAccount.username}) : ouvrez directement une commande ou accédez à toutes vos commandes.`
+                  : 'Accès sécurisé par compte client : saisissez votre code de suivi pour vous connecter et ouvrir votre dossier.'}
               </p>
             </div>
 
             <form
               onSubmit={handleSearchSubmit}
-              className="flex-1 grid sm:grid-cols-3 gap-3 items-start"
+              className="flex-1 flex flex-col sm:flex-row gap-3 items-stretch sm:items-end"
             >
-              <div>
+              <div className="flex-1">
                 <label
-                  htmlFor="quick-order-num"
+                  htmlFor="quick-tracking-code"
                   className="block text-xs font-medium text-slate-600 mb-1"
                 >
-                  Numéro de commande
+                  Code de suivi privé
                 </label>
                 <input
-                  id="quick-order-num"
+                  id="quick-tracking-code"
                   type="text"
-                  placeholder="Ex : CMD-2026-0042"
-                  value={orderNum}
-                  onChange={(e) => setOrderNum(e.target.value)}
-                  className="w-full px-4 py-3 rounded-2xl bg-[#EDF2F4] border border-transparent focus:border-[#119DA4] focus:bg-white focus:outline-none text-base min-h-[44px]"
+                  placeholder="Ex : FBC-A7K9M2"
+                  value={trackingCode}
+                  onChange={(e) => setTrackingCode(e.target.value.toUpperCase())}
+                  className="w-full px-4 py-3 rounded-2xl bg-[#EDF2F4] border border-transparent focus:border-[#119DA4] focus:bg-white focus:outline-none text-base font-mono uppercase min-h-[44px]"
                 />
               </div>
 
-              <div>
-                <label
-                  htmlFor="quick-phone"
-                  className="block text-xs font-medium text-slate-600 mb-1"
-                >
-                  Téléphone utilisé
-                </label>
-                <input
-                  id="quick-phone"
-                  type="tel"
-                  placeholder="Ex : 74 67 77 08"
-                  value={phone}
-                  onChange={(e) => setPhone(e.target.value)}
-                  className="w-full px-4 py-3 rounded-2xl bg-[#EDF2F4] border border-transparent focus:border-[#119DA4] focus:bg-white focus:outline-none text-base min-h-[44px]"
-                />
-              </div>
+              <button
+                type="submit"
+                disabled={searching}
+                className="inline-flex items-center justify-center gap-2 px-6 py-3 rounded-full bg-[#26547C] text-white font-semibold text-base hover:bg-[#1e4466] transition-colors min-h-[48px] disabled:opacity-60 shrink-0"
+              >
+                <Search className="w-4 h-4" />
+                {searching ? 'Recherche...' : 'Accéder au suivi'}
+              </button>
 
-              <div className="sm:pt-5">
-                <button
-                  type="submit"
-                  disabled={searching}
-                  className="w-full inline-flex items-center justify-center gap-2 px-6 py-3 rounded-full bg-[#26547C] text-white font-semibold text-base hover:bg-[#1e4466] transition-colors min-h-[48px] disabled:opacity-60"
-                >
-                  <Search className="w-4 h-4" />
-                  {searching ? 'Recherche...' : 'Accéder au suivi'}
-                </button>
-              </div>
+              <button
+                type="button"
+                onClick={onGoToAccount}
+                className="inline-flex items-center justify-center gap-2 px-5 py-3 rounded-full border-2 border-[#119DA4] text-[#26547C] font-semibold text-sm hover:bg-[#119DA4]/10 transition-colors min-h-[48px] shrink-0"
+              >
+                {clientAccount ? 'Mes commandes' : 'Mon espace client'}
+              </button>
             </form>
           </div>
           {lookupError && (
@@ -393,7 +393,7 @@ export const LandingHero: React.FC<LandingHeroProps> = ({
                   <button
                     type="button"
                     onClick={() => {
-                      const el = document.getElementById('quick-order-num');
+                      const el = document.getElementById('quick-tracking-code');
                       if (el) {
                         el.scrollIntoView({ behavior: 'smooth', block: 'center' });
                         el.focus({ preventScroll: true });

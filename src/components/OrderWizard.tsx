@@ -20,7 +20,7 @@ import {
   Wallet,
 } from 'lucide-react';
 import { APPAREL_SIZE_OPTIONS, getServiceImageSrc } from '../data/defaults';
-import { createOrderInFirestore } from '../lib/firestoreApi';
+import { createClientOrder } from '../lib/clientApi';
 import { generateQuotePdf } from '../lib/pdfGenerator';
 import {
   APPAREL_DISPOSITION_LABELS,
@@ -45,6 +45,7 @@ import type {
   ApparelDisposition,
   ApparelPrintTech,
   ApparelType,
+  ClientAccountPublic,
   JerseyRow,
   Order,
   OrderItem,
@@ -54,15 +55,19 @@ import type {
   UploadedFileMeta,
 } from '../types/fbc';
 import { ApparelDiagram } from './ApparelDiagram';
+import { ClientAuthPanel } from './ClientAuthPanel';
 import { PaymentDeclarationPanel } from './PaymentDeclarationPanel';
 
 interface OrderWizardProps {
   services: PrintService[];
   paymentMethods: PaymentMethod[];
   settings: ShopSettings;
+  clientAccount: ClientAccountPublic | null;
   preselectedServiceId?: string;
   initialReprintOrder?: Order | null;
+  onClientAuthenticated: (account: ClientAccountPublic, claimedOrder?: Order) => void;
   onOrderCreatedAndTrack: (order: Order) => void;
+  onOrderUpdated?: (order: Order) => void;
   onBackHome: () => void;
 }
 
@@ -72,9 +77,12 @@ export const OrderWizard: React.FC<OrderWizardProps> = ({
   services,
   paymentMethods,
   settings,
+  clientAccount,
   preselectedServiceId,
   initialReprintOrder,
+  onClientAuthenticated,
   onOrderCreatedAndTrack,
+  onOrderUpdated,
   onBackHome,
 }) => {
   const activeServices = useMemo(() => services.filter((s) => s.active), [services]);
@@ -192,6 +200,14 @@ export const OrderWizard: React.FC<OrderWizardProps> = ({
       // ignore localStorage read failure
     }
   }, [initialReprintOrder]);
+
+  // Pre-fill coordinates from authenticated client account when empty
+  useEffect(() => {
+    if (clientAccount) {
+      setCustomerName((prev) => (prev.trim() ? prev : clientAccount.fullName));
+      setCustomerPhone((prev) => (prev.trim() ? prev : clientAccount.phone));
+    }
+  }, [clientAccount]);
 
   // Preselect service if passed from home card
   useEffect(() => {
@@ -514,6 +530,10 @@ export const OrderWizard: React.FC<OrderWizardProps> = ({
   const handleStep1Next = (e: React.FormEvent) => {
     e.preventDefault();
     setStep1Error(null);
+    if (!clientAccount) {
+      setStep1Error('Veuillez créer votre compte client ou vous connecter ci-dessus pour sécuriser votre commande.');
+      return;
+    }
     if (customerName.trim().length < 2) {
       setStep1Error('Veuillez renseigner votre nom complet.');
       return;
@@ -561,7 +581,14 @@ export const OrderWizard: React.FC<OrderWizardProps> = ({
     const progressKey = `${item.itemId}__${slotKey}`;
     const { promise, controller } = startResumableUpload(
       file,
-      { itemId: item.itemId, slotKey, slotLabel, version: 1 },
+      {
+        itemId: item.itemId,
+        slotKey,
+        slotLabel,
+        version: 1,
+        purpose: 'order_file',
+        authMode: 'client',
+      },
       (st) => {
         setUploadProgressMap((prev) => ({ ...prev, [progressKey]: st }));
       }
@@ -702,9 +729,10 @@ export const OrderWizard: React.FC<OrderWizardProps> = ({
         source: 'web' as const,
       };
 
-      const created = await createOrderInFirestore(orderPayload);
+      const created = await createClientOrder(orderPayload);
       localStorage.removeItem(DRAFT_STORAGE_KEY);
       setCreatedOrder(created);
+      onOrderUpdated?.(created);
       setStep(5);
     } catch (err) {
       setSubmitError(
@@ -778,67 +806,98 @@ export const OrderWizard: React.FC<OrderWizardProps> = ({
         </div>
       </div>
 
-      {/* STEP 1: Coordinates */}
+      {/* STEP 1: Coordinates & Client Account */}
       {step === 1 && (
-        <form
-          onSubmit={handleStep1Next}
-          className="bg-white rounded-3xl p-6 sm:p-8 border border-slate-200 shadow-sm space-y-6"
-        >
-          <div>
-            <h1 className="font-display text-2xl sm:text-3xl text-[#26547C]">
-              Vos coordonnées
-            </h1>
-            <p className="text-sm text-slate-600 mt-1">
-              Aucun compte requis. Votre numéro sert uniquement à suivre votre commande.
-            </p>
-          </div>
-
-          <div className="grid sm:grid-cols-2 gap-5">
-            <div>
-              <label
-                htmlFor="cust-name"
-                className="block text-sm font-semibold text-[#26547C] mb-1.5"
-              >
-                Nom complet ou Entreprise *
-              </label>
-              <input
-                id="cust-name"
-                type="text"
-                required
-                value={customerName}
-                onChange={(e) => setCustomerName(e.target.value)}
-                placeholder="Ex : Moussa Ouattara / Faso Design"
-                className="w-full px-4 py-3.5 rounded-2xl bg-[#EDF2F4] border border-transparent focus:border-[#119DA4] focus:bg-white focus:outline-none text-base min-h-[44px]"
+        <div className="space-y-6">
+          {!clientAccount ? (
+            <div className="bg-white rounded-3xl p-6 sm:p-8 border border-slate-200 shadow-sm space-y-5">
+              <div>
+                <h1 className="font-display text-2xl sm:text-3xl text-[#26547C]">
+                  Votre compte client &amp; coordonnées
+                </h1>
+                <p className="text-sm text-slate-600 mt-1">
+                  Créez votre compte ou connectez-vous en 30 secondes pour protéger vos fichiers, retrouver toutes vos commandes et recevoir le suivi privé.
+                </p>
+              </div>
+              <ClientAuthPanel
+                compact
+                initialMode="register"
+                shopWhatsapp={settings.whatsapp}
+                onAuthenticated={(acc, claimed) => {
+                  onClientAuthenticated(acc, claimed);
+                  setCustomerName(acc.fullName);
+                  setCustomerPhone(acc.phone);
+                  setStep1Error(null);
+                }}
               />
             </div>
+          ) : (
+            <form
+              onSubmit={handleStep1Next}
+              className="bg-white rounded-3xl p-6 sm:p-8 border border-slate-200 shadow-sm space-y-6"
+            >
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                <div>
+                  <h1 className="font-display text-2xl sm:text-3xl text-[#26547C]">
+                    Vos coordonnées
+                  </h1>
+                  <p className="text-sm text-slate-600 mt-1">
+                    Connecté en tant que{' '}
+                    <strong className="text-[#26547C]">@{clientAccount.username}</strong> — vos fichiers et votre suivi restent strictement privés.
+                  </p>
+                </div>
+                <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-[#2E9E6B]/15 text-[#237A52] text-xs font-semibold self-start">
+                  <CheckCircle2 className="w-3.5 h-3.5" />
+                  Compte vérifié
+                </span>
+              </div>
 
-            <div>
-              <label
-                htmlFor="cust-phone"
-                className="block text-sm font-semibold text-[#26547C] mb-1.5"
-              >
-                Téléphone (Burkina Faso +226) *
-              </label>
-              <input
-                id="cust-phone"
-                type="tel"
-                required
-                value={customerPhone}
-                onChange={(e) => setCustomerPhone(e.target.value)}
-                placeholder="+226 74 67 77 08"
-                className="w-full px-4 py-3.5 rounded-2xl bg-[#EDF2F4] border border-transparent focus:border-[#119DA4] focus:bg-white focus:outline-none text-base min-h-[44px]"
-              />
-              <label className="mt-2 inline-flex items-center gap-2 text-sm text-slate-700 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={isWhatsapp}
-                  onChange={(e) => setIsWhatsapp(e.target.checked)}
-                  className="w-4 h-4 accent-[#119DA4] rounded"
-                />
-                Ce numéro est actif sur WhatsApp (recommandé pour le lien de suivi)
-              </label>
-            </div>
-          </div>
+              <div className="grid sm:grid-cols-2 gap-5">
+                <div>
+                  <label
+                    htmlFor="cust-name"
+                    className="block text-sm font-semibold text-[#26547C] mb-1.5"
+                  >
+                    Nom complet ou Entreprise *
+                  </label>
+                  <input
+                    id="cust-name"
+                    type="text"
+                    required
+                    value={customerName}
+                    onChange={(e) => setCustomerName(e.target.value)}
+                    placeholder="Ex : Moussa Ouattara / Faso Design"
+                    className="w-full px-4 py-3.5 rounded-2xl bg-[#EDF2F4] border border-transparent focus:border-[#119DA4] focus:bg-white focus:outline-none text-base min-h-[44px]"
+                  />
+                </div>
+
+                <div>
+                  <label
+                    htmlFor="cust-phone"
+                    className="block text-sm font-semibold text-[#26547C] mb-1.5"
+                  >
+                    Téléphone (Burkina Faso +226) *
+                  </label>
+                  <input
+                    id="cust-phone"
+                    type="tel"
+                    required
+                    value={customerPhone}
+                    onChange={(e) => setCustomerPhone(e.target.value)}
+                    placeholder="+226 74 67 77 08"
+                    className="w-full px-4 py-3.5 rounded-2xl bg-[#EDF2F4] border border-transparent focus:border-[#119DA4] focus:bg-white focus:outline-none text-base min-h-[44px]"
+                  />
+                  <label className="mt-2 inline-flex items-center gap-2 text-sm text-slate-700 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={isWhatsapp}
+                      onChange={(e) => setIsWhatsapp(e.target.checked)}
+                      className="w-4 h-4 accent-[#119DA4] rounded"
+                    />
+                    Ce numéro est actif sur WhatsApp (recommandé pour le lien de suivi)
+                  </label>
+                </div>
+              </div>
 
           <div className="pt-2 border-t border-slate-100 space-y-4">
             <label className="flex items-center gap-3 cursor-pointer p-4 rounded-2xl bg-[#EDF2F4]/70 hover:bg-[#EDF2F4]">
@@ -934,6 +993,8 @@ export const OrderWizard: React.FC<OrderWizardProps> = ({
             </button>
           </div>
         </form>
+          )}
+        </div>
       )}
 
       {/* STEP 2: Print Type & Dynamic Specifications */}
@@ -2499,8 +2560,8 @@ export const OrderWizard: React.FC<OrderWizardProps> = ({
               <button
                 type="button"
                 onClick={() => {
-                  const link = `${window.location.origin}/client/?track=${encodeURIComponent(
-                    createdOrder.orderId
+                  const link = `${window.location.origin}/client/?code=${encodeURIComponent(
+                    createdOrder.trackingCode
                   )}`;
                   navigator.clipboard.writeText(link);
                   setCopiedTracking(true);
@@ -2514,8 +2575,8 @@ export const OrderWizard: React.FC<OrderWizardProps> = ({
                   <Copy className="w-3.5 h-3.5" />
                 )}
                 {copiedTracking
-                  ? 'Lien privé de suivi copié !'
-                  : 'Copier le lien privé de suivi'}
+                  ? 'Lien de suivi copié !'
+                  : 'Copier le lien de suivi'}
               </button>
             </div>
           </div>
@@ -2525,6 +2586,10 @@ export const OrderWizard: React.FC<OrderWizardProps> = ({
               order={createdOrder}
               paymentMethods={paymentMethods}
               settings={settings}
+              onOrderUpdated={(updated) => {
+                setCreatedOrder(updated);
+                onOrderUpdated?.(updated);
+              }}
               onSuccess={() => onOrderCreatedAndTrack(createdOrder)}
             />
           )}

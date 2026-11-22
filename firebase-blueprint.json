@@ -74,6 +74,7 @@
         "trackingCode": { "type": "string", "maxLength": 40 },
         "quoteNumber": { "type": "string", "maxLength": 40 },
         "receiptNumber": { "type": "string", "maxLength": 40 },
+        "clientAccountId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
         "customerName": { "type": "string", "maxLength": 120 },
         "customerPhone": { "type": "string", "maxLength": 30 },
         "isWhatsapp": { "type": "boolean" },
@@ -111,7 +112,7 @@
     },
     "OrderLookup": {
       "title": "OrderLookup",
-      "description": "Index de recherche sécurisé numéro de commande + téléphone vers orderId",
+      "description": "Index de recherche sécurisé code de suivi + téléphone vers orderId",
       "type": "object",
       "properties": {
         "orderId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
@@ -162,6 +163,27 @@
         "createdAt": { "type": "string", "format": "date-time" }
       },
       "required": ["clientId", "name", "phone", "totalOrders", "totalSpent", "createdAt"]
+    },
+    "ClientAccount": {
+      "title": "ClientAccount",
+      "description": "Compte client sécurisé côté serveur (nom d'utilisateur, téléphone, mot de passe haché)",
+      "type": "object",
+      "properties": {
+        "accountId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "username": { "type": "string", "maxLength": 40 },
+        "usernameLower": { "type": "string", "maxLength": 40 },
+        "fullName": { "type": "string", "maxLength": 120 },
+        "phone": { "type": "string", "maxLength": 30 },
+        "phoneNormalized": { "type": "string", "maxLength": 20 },
+        "passwordHash": { "type": "string", "maxLength": 256 },
+        "passwordSalt": { "type": "string", "maxLength": 128 },
+        "mustChangePassword": { "type": "boolean" },
+        "active": { "type": "boolean" },
+        "lastLoginAt": { "type": "string", "maxLength": 40 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["accountId", "username", "usernameLower", "fullName", "phone", "phoneNormalized", "passwordHash", "passwordSalt", "active", "createdAt", "updatedAt"]
     },
     "AdminUser": {
       "title": "AdminUser",
@@ -256,7 +278,7 @@
     },
     "/order_lookups/{lookupKey}": {
       "schema": { "$ref": "#/entities/OrderLookup" },
-      "description": "Correspondance sécurisée numéro de commande + téléphone vers orderId"
+      "description": "Correspondance sécurisée code de suivi + téléphone vers orderId"
     },
     "/payments/{paymentId}": {
       "schema": { "$ref": "#/entities/Payment" },
@@ -265,6 +287,10 @@
     "/clients/{clientId}": {
       "schema": { "$ref": "#/entities/ClientProfile" },
       "description": "Répertoire clients privé de l'atelier"
+    },
+    "/client_accounts/{accountId}": {
+      "schema": { "$ref": "#/entities/ClientAccount" },
+      "description": "Comptes clients authentifiés gérés exclusivement côté serveur"
     },
     "/admin_users/{uid}": {
       "schema": { "$ref": "#/entities/AdminUser" },
