@@ -96,11 +96,11 @@ function AppContent() {
         if (notifyChanges && prev) {
           const notifications = buildOrderChangeToasts(prev, ord, {
             isOnTrackingView:
-              viewRef.current === 'track' && trackedOrderIdRef.current === ord.orderId,
+              viewRef.current === 'orders' && trackedOrderIdRef.current === ord.orderId,
             onOpenTracking: () => {
               setTrackedOrder(ord);
               setPendingTrackingCode(ord.trackingCode);
-              setView('track');
+              setView('orders');
               window.scrollTo({ top: 0, behavior: 'smooth' });
             },
           });
@@ -184,7 +184,7 @@ function AppContent() {
               if (!active) return;
               setTrackedOrder(res.order);
               setTrackingSecurityNotice(null);
-              setView('track');
+              setView('orders');
               if (!list.some((o) => o.orderId === res.order.orderId)) {
                 syncOrdersAndNotify([res.order, ...list], false);
               }
@@ -196,14 +196,14 @@ function AppContent() {
                   ? err.message
                   : 'Accès refusé : cette commande appartient à un autre compte client.'
               );
-              setView('track');
+              setView('orders');
             }
           } else if (legacyTrackParam) {
             setTrackedOrder(null);
             setTrackingSecurityNotice(
-              'Saisissez votre code de suivi (ex : FBC-A7K9M2) pour consulter votre commande.'
+              'Ouvrez votre commande depuis votre espace « Mes commandes » ou via son code de suivi.'
             );
-            setView('track');
+            setView('orders');
           }
         } else {
           setClientAccount(null);
@@ -213,12 +213,12 @@ function AppContent() {
             setTrackingSecurityNotice(
               `Connectez-vous ou créez votre compte client pour consulter la commande ${codeParam} en toute confidentialité.`
             );
-            setView('track');
+            setView('orders');
           } else if (legacyTrackParam) {
             setTrackingSecurityNotice(
-              'Par mesure de sécurité, connectez-vous à votre compte client puis saisissez votre code de suivi (FBC-...).'
+              'Par mesure de sécurité, connectez-vous à votre compte client pour accéder à votre commande.'
             );
-            setView('track');
+            setView('orders');
           }
         }
       } catch {
@@ -272,7 +272,7 @@ function AppContent() {
       setTrackingSecurityNotice(
         `Connectez-vous à votre compte client ou créez votre compte pour consulter la commande ${cleanCode} en toute confidentialité.`
       );
-      setView('track');
+      setView('orders');
       window.scrollTo({ top: 0, behavior: 'smooth' });
       return null;
     }
@@ -283,7 +283,7 @@ function AppContent() {
       setTrackedOrder(res.order);
       setPendingTrackingCode(res.order.trackingCode);
       setTrackingSecurityNotice(null);
-      setView('track');
+      setView('orders');
       window.history.replaceState(
         {},
         '',
@@ -297,7 +297,7 @@ function AppContent() {
         setTrackedOrder(null);
         setPendingTrackingCode(cleanCode);
         setTrackingSecurityNotice(err.message);
-        setView('track');
+        setView('orders');
       }
       return err instanceof Error
         ? err.message
@@ -321,7 +321,7 @@ function AppContent() {
       setTrackedOrder(claimedOrder);
       setPendingTrackingCode(claimedOrder.trackingCode);
       setTrackingSecurityNotice(null);
-      setView('track');
+      setView('orders');
       window.history.replaceState(
         {},
         '',
@@ -336,7 +336,7 @@ function AppContent() {
         handleOrderUpdated(res.order);
         setTrackedOrder(res.order);
         setTrackingSecurityNotice(null);
-        setView('track');
+        setView('orders');
         window.history.replaceState(
           {},
           '',
@@ -349,7 +349,7 @@ function AppContent() {
             ? err.message
             : 'Cette commande appartient à un autre compte client.'
         );
-        setView('track');
+        setView('orders');
       }
     }
   };
@@ -359,7 +359,7 @@ function AppContent() {
     setTrackedOrder(order);
     setTrackingSecurityNotice(null);
     setPendingTrackingCode(order.trackingCode);
-    setView('track');
+    setView('orders');
     window.history.replaceState(
       {},
       '',
@@ -370,7 +370,7 @@ function AppContent() {
       id: `order_created_${order.orderId}`,
       badge: order.orderNumber,
       title: 'Commande enregistrée !',
-      message: `Conservez votre code de suivi ${order.trackingCode}. Vous recevrez les notifications en temps réel dans votre espace client.`,
+      message: `Conservez votre code de suivi ${order.trackingCode}. Vous recevrez les notifications en temps réel dans votre espace « Mes commandes ».`,
       variant: 'success',
       durationMs: 7500,
     });
@@ -392,6 +392,10 @@ function AppContent() {
         currentView={view}
         clientAccount={clientAccount}
         onNavigate={(v) => {
+          if (v === 'orders' && view !== 'orders') {
+            setTrackedOrder(null);
+            setTrackingSecurityNotice(null);
+          }
           setView(v);
           window.scrollTo({ top: 0, behavior: 'smooth' });
         }}
@@ -409,7 +413,8 @@ function AppContent() {
             onStartOrder={handleStartOrder}
             onQuickTrackCode={handleOpenCode}
             onGoToAccount={() => {
-              setView('account');
+              setTrackedOrder(null);
+              setView('orders');
               window.scrollTo({ top: 0, behavior: 'smooth' });
             }}
           />
@@ -431,42 +436,51 @@ function AppContent() {
           />
         )}
 
-        {view === 'track' && (
-          <OrderTrackingView
-            order={trackedOrder}
-            clientAccount={clientAccount}
-            settings={settings}
-            paymentMethods={paymentMethods}
-            initialTrackingCode={pendingTrackingCode}
-            securityNotice={trackingSecurityNotice}
-            onAuthenticated={(acc, claimed) => {
-              void handleClientAuthenticated(acc, claimed);
-            }}
-            onOpenCode={handleOpenCode}
-            onOrderUpdated={handleOrderUpdated}
-            onBackToOrders={() => {
-              setTrackedOrder(null);
-              setPendingTrackingCode('');
-              setTrackingSecurityNotice(null);
-              window.history.replaceState({}, '', '/client/');
-              setView('account');
-              window.scrollTo({ top: 0, behavior: 'smooth' });
-            }}
-          />
-        )}
-
-        {view === 'account' && (
-          clientAccount ? (
+        {view === 'orders' && (
+          !clientAccount ? (
+            <div className="max-w-xl mx-auto px-4 py-10 sm:py-12">
+              <ClientAuthPanel
+                initialMode="login"
+                prefilledTrackingCode={pendingTrackingCode}
+                notice={trackingSecurityNotice}
+                shopWhatsapp={settings.whatsapp}
+                onAuthenticated={(acc, claimed) => {
+                  void handleClientAuthenticated(acc, claimed);
+                }}
+              />
+            </div>
+          ) : trackedOrder ? (
+            <OrderTrackingView
+              order={trackedOrder}
+              clientAccount={clientAccount}
+              settings={settings}
+              paymentMethods={paymentMethods}
+              initialTrackingCode={pendingTrackingCode}
+              securityNotice={trackingSecurityNotice}
+              onAuthenticated={(acc, claimed) => {
+                void handleClientAuthenticated(acc, claimed);
+              }}
+              onOpenCode={handleOpenCode}
+              onOrderUpdated={handleOrderUpdated}
+              onBackToOrders={() => {
+                setTrackedOrder(null);
+                setPendingTrackingCode('');
+                setTrackingSecurityNotice(null);
+                window.history.replaceState({}, '', '/client/');
+                window.scrollTo({ top: 0, behavior: 'smooth' });
+              }}
+            />
+          ) : (
             <ClientOrdersDashboard
               account={clientAccount}
               orders={myOrders}
               loading={loadingOrders}
+              securityNotice={trackingSecurityNotice}
               onRefresh={() => loadMyOrders(false)}
               onOpenOrder={(ord) => {
                 setTrackedOrder(ord);
                 setPendingTrackingCode(ord.trackingCode);
                 setTrackingSecurityNotice(null);
-                setView('track');
                 window.history.replaceState(
                   {},
                   '',
@@ -474,31 +488,11 @@ function AppContent() {
                 );
                 window.scrollTo({ top: 0, behavior: 'smooth' });
               }}
-              onOrderClaimed={(ord) => {
-                handleOrderUpdated(ord);
-                setTrackedOrder(ord);
-                setPendingTrackingCode(ord.trackingCode);
-                setView('track');
-                window.history.replaceState(
-                  {},
-                  '',
-                  `/client/?code=${encodeURIComponent(ord.trackingCode)}`
-                );
-              }}
+              onOpenCode={handleOpenCode}
               onStartOrder={() => handleStartOrder()}
               onAccountUpdated={(updatedAcc) => setClientAccount(updatedAcc)}
               onLoggedOut={handleLoggedOut}
             />
-          ) : (
-            <div className="max-w-xl mx-auto px-4 py-10 sm:py-12">
-              <ClientAuthPanel
-                initialMode="login"
-                shopWhatsapp={settings.whatsapp}
-                onAuthenticated={(acc, claimed) => {
-                  void handleClientAuthenticated(acc, claimed);
-                }}
-              />
-            </div>
           )
         )}
       </main>

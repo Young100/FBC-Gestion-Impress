@@ -4,12 +4,12 @@ import {
   ArrowRight,
   BellRing,
   KeyRound,
-  Link2,
   Loader2,
   LogOut,
   Package,
   Plus,
   RefreshCw,
+  Search,
   ShieldCheck,
   Volume2,
   VolumeX,
@@ -29,7 +29,6 @@ import {
 } from '../lib/browserNotifications';
 import {
   changeClientPassword,
-  claimOrderByTrackingCode,
   logoutClientAccount,
 } from '../lib/clientApi';
 import { formatFcfa } from '../lib/pricing';
@@ -46,9 +45,10 @@ interface ClientOrdersDashboardProps {
   account: ClientAccountPublic;
   orders: Order[];
   loading: boolean;
+  securityNotice?: string | null;
   onRefresh: () => Promise<void> | void;
   onOpenOrder: (order: Order) => void;
-  onOrderClaimed: (order: Order) => void;
+  onOpenCode: (trackingCode: string) => Promise<string | null>;
   onStartOrder: () => void;
   onAccountUpdated: (account: ClientAccountPublic) => void;
   onLoggedOut: () => void;
@@ -60,9 +60,10 @@ export const ClientOrdersDashboard: React.FC<ClientOrdersDashboardProps> = ({
   account,
   orders,
   loading,
+  securityNotice = null,
   onRefresh,
   onOpenOrder,
-  onOrderClaimed,
+  onOpenCode,
   onStartOrder,
   onAccountUpdated,
   onLoggedOut,
@@ -162,22 +163,13 @@ export const ClientOrdersDashboard: React.FC<ClientOrdersDashboardProps> = ({
     }
     setClaiming(true);
     try {
-      const res = await claimOrderByTrackingCode(trimmed);
-      setClaimCode('');
-      setShowClaimBox(false);
-      onOrderClaimed(res.order);
-      showToast({
-        id: `claimed_${res.order.orderId}`,
-        badge: res.order.orderNumber,
-        title: res.claimed ? 'Commande rattachée' : 'Commande trouvée',
-        message: `La commande ${res.order.orderNumber} est accessible dans votre espace.`,
-        variant: 'success',
-        durationMs: 5000,
-      });
-    } catch (err) {
-      setClaimError(
-        err instanceof Error ? err.message : 'Impossible de rattacher cette commande.'
-      );
+      const err = await onOpenCode(trimmed);
+      if (err) {
+        setClaimError(err);
+      } else {
+        setClaimCode('');
+        setShowClaimBox(false);
+      }
     } finally {
       setClaiming(false);
     }
@@ -392,7 +384,13 @@ export const ClientOrdersDashboard: React.FC<ClientOrdersDashboardProps> = ({
         )}
       </div>
 
-      {/* Actions & Claim existing order bar */}
+      {/* Unified Quick Tracking / Claim Bar + Filters */}
+      {securityNotice && (
+        <div className="text-xs sm:text-sm font-medium text-[#EF233C] bg-[#EF233C]/10 border border-[#EF233C]/25 px-4 py-3 rounded-2xl">
+          {securityNotice}
+        </div>
+      )}
+
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
         <div className="flex flex-wrap items-center gap-2">
           {(
@@ -427,8 +425,8 @@ export const ClientOrdersDashboard: React.FC<ClientOrdersDashboardProps> = ({
             onClick={() => setShowClaimBox((v) => !v)}
             className="inline-flex items-center gap-1.5 px-4 py-2 rounded-full bg-white border border-slate-200 text-[#26547C] text-xs sm:text-sm font-semibold hover:border-[#119DA4] min-h-[42px]"
           >
-            <Link2 className="w-4 h-4 text-[#119DA4]" />
-            Rattacher une commande
+            <Search className="w-4 h-4 text-[#119DA4]" />
+            Suivre par code
           </button>
 
           <button
@@ -459,10 +457,10 @@ export const ClientOrdersDashboard: React.FC<ClientOrdersDashboardProps> = ({
           className="bg-white rounded-2xl p-4 sm:p-5 border border-[#119DA4]/30 shadow-sm space-y-3"
         >
           <div className="text-sm font-bold text-[#26547C]">
-            Rattacher une commande passée en atelier
+            Suivre ou rattacher une commande via son code
           </div>
           <p className="text-xs text-slate-600">
-            Indiquez le code de suivi remis sur votre devis ou SMS (ex : FBC-A7K9M2). Le numéro de téléphone de la commande doit correspondre à <strong className="text-black">{account.phone}</strong>.
+            Saisissez un code de suivi (ex : FBC-A7K9M2) pour l’ouvrir directement ou rattacher une commande passée en atelier au numéro <strong className="text-black">{account.phone}</strong>.
           </p>
           <div className="flex flex-col sm:flex-row gap-2.5">
             <input
@@ -478,7 +476,7 @@ export const ClientOrdersDashboard: React.FC<ClientOrdersDashboardProps> = ({
               className="inline-flex items-center justify-center gap-2 px-5 py-2.5 rounded-full bg-[#119DA4] text-white text-sm font-semibold hover:bg-[#0e848a] min-h-[44px]"
             >
               {claiming && <Loader2 className="w-4 h-4 animate-spin" />}
-              Rattacher à mon compte
+              Ouvrir le suivi
             </button>
           </div>
           {claimError && (

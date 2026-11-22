@@ -87,19 +87,20 @@ export const OrderWizard: React.FC<OrderWizardProps> = ({
 }) => {
   const activeServices = useMemo(() => services.filter((s) => s.active), [services]);
 
-  const [step, setStep] = useState<1 | 2 | 3 | 4 | 5>(1);
+  const [step, setStep] = useState<1 | 2 | 3 | 4 | 5>(() =>
+    initialReprintOrder ? 3 : clientAccount ? 2 : 1
+  );
 
-  // Step 1: Coordinates
-  const [customerName, setCustomerName] = useState('');
-  const [customerPhone, setCustomerPhone] = useState('');
-  const [isWhatsapp, setIsWhatsapp] = useState(true);
+  // Step 1: Account / Coordinates synced strictly from clientAccount
+  const [customerName, setCustomerName] = useState(clientAccount?.fullName || '');
+  const [customerPhone, setCustomerPhone] = useState(clientAccount?.phone || '');
+  const [isWhatsapp] = useState(true);
   const [wantsDelivery, setWantsDelivery] = useState(false);
   const [deliveryZoneId, setDeliveryZoneId] = useState(
     settings.deliveryZones[0]?.id || ''
   );
   const [deliveryAddress, setDeliveryAddress] = useState('');
   const [urgent, setUrgent] = useState(false);
-  const [step1Error, setStep1Error] = useState<string | null>(null);
 
   // Step 2: Cart + Current Service Configurator
   const [cartItems, setCartItems] = useState<OrderItem[]>([]);
@@ -175,7 +176,6 @@ export const OrderWizard: React.FC<OrderWizardProps> = ({
     if (initialReprintOrder) {
       setCustomerName(initialReprintOrder.customerName);
       setCustomerPhone(initialReprintOrder.customerPhone);
-      setIsWhatsapp(initialReprintOrder.isWhatsapp);
       setWantsDelivery(initialReprintOrder.wantsDelivery);
       setDeliveryAddress(initialReprintOrder.deliveryAddress || '');
       setCartItems(initialReprintOrder.items);
@@ -187,9 +187,6 @@ export const OrderWizard: React.FC<OrderWizardProps> = ({
       const saved = localStorage.getItem(DRAFT_STORAGE_KEY);
       if (saved) {
         const parsed = JSON.parse(saved);
-        if (parsed.customerName) setCustomerName(parsed.customerName);
-        if (parsed.customerPhone) setCustomerPhone(parsed.customerPhone);
-        if (typeof parsed.isWhatsapp === 'boolean') setIsWhatsapp(parsed.isWhatsapp);
         if (typeof parsed.wantsDelivery === 'boolean') setWantsDelivery(parsed.wantsDelivery);
         if (parsed.deliveryAddress) setDeliveryAddress(parsed.deliveryAddress);
         if (Array.isArray(parsed.cartItems) && parsed.cartItems.length > 0) {
@@ -201,11 +198,12 @@ export const OrderWizard: React.FC<OrderWizardProps> = ({
     }
   }, [initialReprintOrder]);
 
-  // Pre-fill coordinates from authenticated client account when empty
+  // Auto-sync coordinates from authenticated client account & bypass Step 1
   useEffect(() => {
     if (clientAccount) {
-      setCustomerName((prev) => (prev.trim() ? prev : clientAccount.fullName));
-      setCustomerPhone((prev) => (prev.trim() ? prev : clientAccount.phone));
+      setCustomerName(clientAccount.fullName);
+      setCustomerPhone(clientAccount.phone);
+      setStep((prev) => (prev === 1 ? 2 : prev));
     }
   }, [clientAccount]);
 
@@ -220,16 +218,13 @@ export const OrderWizard: React.FC<OrderWizardProps> = ({
     }
   }, [preselectedServiceId, activeServices]);
 
-  // Save draft continuously
+  // Save draft continuously (cart & delivery preferences only)
   useEffect(() => {
     if (createdOrder) return;
     try {
       localStorage.setItem(
         DRAFT_STORAGE_KEY,
         JSON.stringify({
-          customerName,
-          customerPhone,
-          isWhatsapp,
           wantsDelivery,
           deliveryAddress,
           cartItems,
@@ -238,7 +233,7 @@ export const OrderWizard: React.FC<OrderWizardProps> = ({
     } catch {
       // ignore quota
     }
-  }, [customerName, customerPhone, isWhatsapp, wantsDelivery, deliveryAddress, cartItems, createdOrder]);
+  }, [wantsDelivery, deliveryAddress, cartItems, createdOrder]);
 
   const currentService =
     activeServices.find((s) => s.id === selectedServiceId) || activeServices[0];
@@ -526,31 +521,6 @@ export const OrderWizard: React.FC<OrderWizardProps> = ({
     setStep(3);
   };
 
-  // Validate Step 1
-  const handleStep1Next = (e: React.FormEvent) => {
-    e.preventDefault();
-    setStep1Error(null);
-    if (!clientAccount) {
-      setStep1Error('Veuillez créer votre compte client ou vous connecter ci-dessus pour sécuriser votre commande.');
-      return;
-    }
-    if (customerName.trim().length < 2) {
-      setStep1Error('Veuillez renseigner votre nom complet.');
-      return;
-    }
-    const check = normalizeBurkinaPhone(customerPhone);
-    if (!check.valid) {
-      setStep1Error(check.error || 'Numéro de téléphone invalide.');
-      return;
-    }
-    setCustomerPhone(check.normalized);
-    if (wantsDelivery && deliveryAddress.trim().length < 3) {
-      setStep1Error('Veuillez indiquer votre adresse ou quartier de livraison.');
-      return;
-    }
-    setStep(2);
-  };
-
   // File upload handler for a specific item + slot
   const handleSlotFileUpload = async (
     item: OrderItem,
@@ -682,18 +652,30 @@ export const OrderWizard: React.FC<OrderWizardProps> = ({
           ? selectedApparelTypes.length
           : 1
         : 0;
-  const stepProgressPercent = Math.min(100, step * 25);
+  const totalVisualSteps = clientAccount ? 4 : 5;
+  const currentVisualStep = clientAccount ? Math.max(1, step - 1) : step;
+  const stepProgressPercent = clientAccount
+    ? Math.min(100, Math.round((Math.min(3, currentVisualStep) / 3) * 100))
+    : Math.min(100, step * 25);
   const stepShortTitles: Record<1 | 2 | 3 | 4 | 5, string> = {
-    1: 'Coordonnées',
+    1: 'Compte client',
     2: 'Impression',
     3: 'Fichiers',
-    4: 'Validation',
+    4: 'Réception & Validation',
     5: 'Confirmation',
   };
 
   // Final Order Submission
   const handleFinalSubmit = async () => {
     setSubmitError(null);
+    if (!clientAccount) {
+      setStep(1);
+      return;
+    }
+    if (wantsDelivery && deliveryAddress.trim().length < 3) {
+      setSubmitError('Veuillez indiquer votre adresse ou quartier de livraison.');
+      return;
+    }
     if (!acceptedTerms) {
       setSubmitError('Veuillez accepter les conditions de commande avant de valider.');
       return;
@@ -703,9 +685,13 @@ export const OrderWizard: React.FC<OrderWizardProps> = ({
       const validUntilDate = new Date();
       validUntilDate.setDate(validUntilDate.getDate() + (settings.quoteValidityDays || 15));
 
+      const finalName = clientAccount.fullName || customerName.trim();
+      const finalPhone =
+        clientAccount.phone || normalizeBurkinaPhone(customerPhone).normalized;
+
       const orderPayload = {
-        customerName: customerName.trim(),
-        customerPhone: normalizeBurkinaPhone(customerPhone).normalized,
+        customerName: finalName,
+        customerPhone: finalPhone,
         isWhatsapp,
         wantsDelivery,
         deliveryZoneId: wantsDelivery && selectedZone ? selectedZone.id : '',
@@ -770,21 +756,28 @@ export const OrderWizard: React.FC<OrderWizardProps> = ({
     );
   }
 
-  const STEP_LABELS = [
-    '1. Coordonnées',
-    '2. Impression',
-    '3. Fichiers',
-    '4. Validation',
-    '5. Devis & Paiement',
-  ];
+  const STEP_ENTRIES: Array<{ stepNum: 1 | 2 | 3 | 4 | 5; label: string }> =
+    clientAccount
+      ? [
+          { stepNum: 2, label: '1. Impression' },
+          { stepNum: 3, label: '2. Fichiers' },
+          { stepNum: 4, label: '3. Réception & Validation' },
+          { stepNum: 5, label: '4. Devis & Paiement' },
+        ]
+      : [
+          { stepNum: 1, label: '1. Compte client' },
+          { stepNum: 2, label: '2. Impression' },
+          { stepNum: 3, label: '3. Fichiers' },
+          { stepNum: 4, label: '4. Réception & Validation' },
+          { stepNum: 5, label: '5. Devis & Paiement' },
+        ];
 
   return (
     <div className="max-w-5xl mx-auto px-4 sm:px-6 py-8 space-y-6">
       {/* Progress Bar */}
       <div className="bg-white rounded-3xl p-4 sm:p-5 border border-slate-200/80 shadow-sm">
         <div className="flex items-center justify-between gap-2 overflow-x-auto no-scrollbar">
-          {STEP_LABELS.map((label, idx) => {
-            const stepNum = (idx + 1) as 1 | 2 | 3 | 4 | 5;
+          {STEP_ENTRIES.map(({ stepNum, label }) => {
             const active = step === stepNum;
             const done = step > stepNum;
             return (
@@ -806,194 +799,28 @@ export const OrderWizard: React.FC<OrderWizardProps> = ({
         </div>
       </div>
 
-      {/* STEP 1: Coordinates & Client Account */}
-      {step === 1 && (
-        <div className="space-y-6">
-          {!clientAccount ? (
-            <div className="bg-white rounded-3xl p-6 sm:p-8 border border-slate-200 shadow-sm space-y-5">
-              <div>
-                <h1 className="font-display text-2xl sm:text-3xl text-[#26547C]">
-                  Votre compte client &amp; coordonnées
-                </h1>
-                <p className="text-sm text-slate-600 mt-1">
-                  Créez votre compte ou connectez-vous en 30 secondes pour protéger vos fichiers, retrouver toutes vos commandes et recevoir le suivi privé.
-                </p>
-              </div>
-              <ClientAuthPanel
-                compact
-                initialMode="register"
-                shopWhatsapp={settings.whatsapp}
-                onAuthenticated={(acc, claimed) => {
-                  onClientAuthenticated(acc, claimed);
-                  setCustomerName(acc.fullName);
-                  setCustomerPhone(acc.phone);
-                  setStep1Error(null);
-                }}
-              />
-            </div>
-          ) : (
-            <form
-              onSubmit={handleStep1Next}
-              className="bg-white rounded-3xl p-6 sm:p-8 border border-slate-200 shadow-sm space-y-6"
-            >
-              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-                <div>
-                  <h1 className="font-display text-2xl sm:text-3xl text-[#26547C]">
-                    Vos coordonnées
-                  </h1>
-                  <p className="text-sm text-slate-600 mt-1">
-                    Connecté en tant que{' '}
-                    <strong className="text-[#26547C]">@{clientAccount.username}</strong> — vos fichiers et votre suivi restent strictement privés.
-                  </p>
-                </div>
-                <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-[#2E9E6B]/15 text-[#237A52] text-xs font-semibold self-start">
-                  <CheckCircle2 className="w-3.5 h-3.5" />
-                  Compte vérifié
-                </span>
-              </div>
-
-              <div className="grid sm:grid-cols-2 gap-5">
-                <div>
-                  <label
-                    htmlFor="cust-name"
-                    className="block text-sm font-semibold text-[#26547C] mb-1.5"
-                  >
-                    Nom complet ou Entreprise *
-                  </label>
-                  <input
-                    id="cust-name"
-                    type="text"
-                    required
-                    value={customerName}
-                    onChange={(e) => setCustomerName(e.target.value)}
-                    placeholder="Ex : Moussa Ouattara / Faso Design"
-                    className="w-full px-4 py-3.5 rounded-2xl bg-[#EDF2F4] border border-transparent focus:border-[#119DA4] focus:bg-white focus:outline-none text-base min-h-[44px]"
-                  />
-                </div>
-
-                <div>
-                  <label
-                    htmlFor="cust-phone"
-                    className="block text-sm font-semibold text-[#26547C] mb-1.5"
-                  >
-                    Téléphone (Burkina Faso +226) *
-                  </label>
-                  <input
-                    id="cust-phone"
-                    type="tel"
-                    required
-                    value={customerPhone}
-                    onChange={(e) => setCustomerPhone(e.target.value)}
-                    placeholder="+226 74 67 77 08"
-                    className="w-full px-4 py-3.5 rounded-2xl bg-[#EDF2F4] border border-transparent focus:border-[#119DA4] focus:bg-white focus:outline-none text-base min-h-[44px]"
-                  />
-                  <label className="mt-2 inline-flex items-center gap-2 text-sm text-slate-700 cursor-pointer">
-                    <input
-                      type="checkbox"
-                      checked={isWhatsapp}
-                      onChange={(e) => setIsWhatsapp(e.target.checked)}
-                      className="w-4 h-4 accent-[#119DA4] rounded"
-                    />
-                    Ce numéro est actif sur WhatsApp (recommandé pour le lien de suivi)
-                  </label>
-                </div>
-              </div>
-
-          <div className="pt-2 border-t border-slate-100 space-y-4">
-            <label className="flex items-center gap-3 cursor-pointer p-4 rounded-2xl bg-[#EDF2F4]/70 hover:bg-[#EDF2F4]">
-              <input
-                type="checkbox"
-                checked={wantsDelivery}
-                onChange={(e) => setWantsDelivery(e.target.checked)}
-                className="w-5 h-5 accent-[#119DA4] rounded"
-              />
-              <div>
-                <div className="font-semibold text-base text-[#26547C]">
-                  Je souhaite être livré
-                </div>
-                <div className="text-xs text-slate-600">
-                  Décochez pour un retrait gratuit à l’agence ({settings.address}).
-                </div>
-              </div>
-            </label>
-
-            {wantsDelivery && (
-              <div className="grid sm:grid-cols-2 gap-4 pl-2">
-                <div>
-                  <label
-                    htmlFor="del-zone"
-                    className="block text-sm font-semibold text-[#26547C] mb-1.5"
-                  >
-                    Zone de livraison
-                  </label>
-                  <select
-                    id="del-zone"
-                    value={deliveryZoneId}
-                    onChange={(e) => setDeliveryZoneId(e.target.value)}
-                    className="w-full px-4 py-3.5 rounded-2xl bg-[#EDF2F4] border border-transparent focus:border-[#119DA4] focus:bg-white text-base min-h-[44px]"
-                  >
-                    {settings.deliveryZones.map((z) => (
-                      <option key={z.id} value={z.id}>
-                        {z.name} (+{formatFcfa(z.fee)})
-                      </option>
-                    ))}
-                  </select>
-                </div>
-
-                <div>
-                  <label
-                    htmlFor="del-addr"
-                    className="block text-sm font-semibold text-[#26547C] mb-1.5"
-                  >
-                    Adresse précise / Secteur / Repère *
-                  </label>
-                  <input
-                    id="del-addr"
-                    type="text"
-                    value={deliveryAddress}
-                    onChange={(e) => setDeliveryAddress(e.target.value)}
-                    placeholder="Ex : Secteur 18, près du marché"
-                    className="w-full px-4 py-3.5 rounded-2xl bg-[#EDF2F4] border border-transparent focus:border-[#119DA4] focus:bg-white text-base min-h-[44px]"
-                  />
-                </div>
-              </div>
-            )}
-
-            <label className="flex items-center gap-3 cursor-pointer p-4 rounded-2xl border border-slate-200">
-              <input
-                type="checkbox"
-                checked={urgent}
-                onChange={(e) => setUrgent(e.target.checked)}
-                className="w-5 h-5 accent-[#EF233C] rounded"
-              />
-              <div>
-                <div className="font-semibold text-base text-[#26547C]">
-                  Traitement prioritaire / Urgent (+{settings.urgentSurchargePercent}%)
-                </div>
-                <div className="text-xs text-slate-600">
-                  Passage en tête de file à l’atelier dès validation du paiement.
-                </div>
-              </div>
-            </label>
-          </div>
-
-          {step1Error && (
-            <p className="text-sm font-medium text-[#EF233C] bg-[#EF233C]/10 px-4 py-3 rounded-2xl">
-              {step1Error}
+      {/* STEP 1: Client Account (shown only if not yet authenticated) */}
+      {step === 1 && !clientAccount && (
+        <div className="bg-white rounded-3xl p-6 sm:p-8 border border-slate-200 shadow-sm space-y-5">
+          <div>
+            <h1 className="font-display text-2xl sm:text-3xl text-[#26547C]">
+              Connexion ou création de compte client
+            </h1>
+            <p className="text-sm text-slate-600 mt-1">
+              Identifiez-vous une seule fois : vos commandes et fichiers resteront liés à votre compte sans avoir à ressaisir vos informations.
             </p>
-          )}
-
-          <div className="flex justify-end">
-            <button
-              type="submit"
-              className="inline-flex items-center gap-2 px-8 py-3.5 rounded-full bg-[#26547C] text-white font-semibold text-base hover:bg-[#1e4466] min-h-[48px]"
-            >
-              Choisir l’impression
-              <ArrowRight className="w-5 h-5" />
-            </button>
           </div>
-        </form>
-          )}
+          <ClientAuthPanel
+            compact
+            initialMode="register"
+            shopWhatsapp={settings.whatsapp}
+            onAuthenticated={(acc, claimed) => {
+              onClientAuthenticated(acc, claimed);
+              setCustomerName(acc.fullName);
+              setCustomerPhone(acc.phone);
+              setStep(2);
+            }}
+          />
         </div>
       )}
 
@@ -1001,13 +828,23 @@ export const OrderWizard: React.FC<OrderWizardProps> = ({
       {step === 2 && currentService && (
         <div className="space-y-6">
           <div className="bg-white rounded-3xl p-6 sm:p-8 border border-slate-200 shadow-sm space-y-6">
-            <div>
-              <h1 className="font-display text-2xl sm:text-3xl text-[#26547C]">
-                Type d’impression et caractéristiques
-              </h1>
-              <p className="text-sm text-slate-600 mt-1">
-                Choisissez une prestation puis renseignez vos dimensions et quantités.
-              </p>
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div>
+                <h1 className="font-display text-2xl sm:text-3xl text-[#26547C]">
+                  Type d’impression et caractéristiques
+                </h1>
+                <p className="text-sm text-slate-600 mt-1">
+                  Choisissez une prestation puis renseignez vos dimensions et quantités.
+                </p>
+              </div>
+              {clientAccount && (
+                <div className="inline-flex items-center gap-2 px-3.5 py-2 rounded-2xl bg-[#EDF2F4] text-xs font-semibold text-[#26547C] self-start">
+                  <CheckCircle2 className="w-4 h-4 text-[#2E9E6B] shrink-0" />
+                  <span>
+                    {clientAccount.fullName} (@{clientAccount.username}) · {clientAccount.phone}
+                  </span>
+                </div>
+              )}
             </div>
 
             {/* Illustrated Service Cards */}
@@ -1940,11 +1777,11 @@ export const OrderWizard: React.FC<OrderWizardProps> = ({
             <div className="flex flex-col sm:flex-row items-center justify-between gap-3 pt-2">
               <button
                 type="button"
-                onClick={() => setStep(1)}
+                onClick={() => (clientAccount ? onBackHome() : setStep(1))}
                 className="inline-flex items-center gap-2 px-6 py-3 rounded-full border border-slate-300 text-slate-700 font-medium text-sm min-h-[44px]"
               >
                 <ArrowLeft className="w-4 h-4" />
-                Retour
+                {clientAccount ? 'Accueil' : 'Retour'}
               </button>
 
               <button
@@ -2212,26 +2049,82 @@ export const OrderWizard: React.FC<OrderWizardProps> = ({
           </div>
 
           <div className="grid md:grid-cols-2 gap-5">
-            <div className="bg-[#EDF2F4] rounded-2xl p-5 space-y-2">
-              <div className="flex items-center justify-between">
-                <span className="font-bold text-[#26547C]">Coordonnées</span>
-                <button
-                  type="button"
-                  onClick={() => setStep(1)}
-                  className="text-xs font-semibold text-[#119DA4] hover:underline"
-                >
-                  Modifier
-                </button>
+            <div className="bg-[#EDF2F4] rounded-2xl p-5 space-y-4">
+              <div className="flex items-center justify-between gap-2">
+                <span className="font-bold text-[#26547C]">Compte client &amp; Réception</span>
+                <span className="text-[11px] font-semibold px-2.5 py-0.5 rounded-full bg-[#2E9E6B]/15 text-[#237A52]">
+                  @{clientAccount?.username}
+                </span>
               </div>
-              <p className="text-sm text-slate-800 font-semibold">{customerName}</p>
-              <p className="text-sm text-slate-700 tabular-nums">
-                {customerPhone} {isWhatsapp ? '· WhatsApp' : ''}
-              </p>
-              <p className="text-sm text-slate-700">
-                {wantsDelivery
-                  ? `Livraison (${selectedZone?.name}) : ${deliveryAddress}`
-                  : 'Retrait à l’agence FBC Print'}
-              </p>
+
+              <div className="bg-white/80 rounded-xl px-3.5 py-2.5 text-sm space-y-0.5 border border-slate-200/70">
+                <div className="font-semibold text-[#26547C]">
+                  {clientAccount?.fullName || customerName}
+                </div>
+                <div className="text-xs text-slate-600 tabular-nums">
+                  {clientAccount?.phone || customerPhone}
+                </div>
+              </div>
+
+              <div className="space-y-3 pt-1">
+                <label className="flex items-start gap-2.5 cursor-pointer text-sm">
+                  <input
+                    type="checkbox"
+                    checked={wantsDelivery}
+                    onChange={(e) => setWantsDelivery(e.target.checked)}
+                    className="w-4 h-4 mt-0.5 accent-[#119DA4] rounded"
+                  />
+                  <div>
+                    <div className="font-semibold text-[#26547C]">
+                      Je souhaite être livré
+                    </div>
+                    <div className="text-xs text-slate-600">
+                      Sinon retrait gratuit à l’agence ({settings.address}).
+                    </div>
+                  </div>
+                </label>
+
+                {wantsDelivery && (
+                  <div className="space-y-2.5 pl-6">
+                    <select
+                      aria-label="Zone de livraison"
+                      value={deliveryZoneId}
+                      onChange={(e) => setDeliveryZoneId(e.target.value)}
+                      className="w-full px-3.5 py-2.5 rounded-xl bg-white border border-slate-200 text-sm min-h-[42px]"
+                    >
+                      {settings.deliveryZones.map((z) => (
+                        <option key={z.id} value={z.id}>
+                          {z.name} (+{formatFcfa(z.fee)})
+                        </option>
+                      ))}
+                    </select>
+                    <input
+                      type="text"
+                      value={deliveryAddress}
+                      onChange={(e) => setDeliveryAddress(e.target.value)}
+                      placeholder="Adresse précise / Secteur / Repère *"
+                      className="w-full px-3.5 py-2.5 rounded-xl bg-white border border-slate-200 text-sm min-h-[42px]"
+                    />
+                  </div>
+                )}
+
+                <label className="flex items-start gap-2.5 cursor-pointer text-sm pt-1 border-t border-slate-200/80">
+                  <input
+                    type="checkbox"
+                    checked={urgent}
+                    onChange={(e) => setUrgent(e.target.checked)}
+                    className="w-4 h-4 mt-0.5 accent-[#EF233C] rounded"
+                  />
+                  <div>
+                    <div className="font-semibold text-[#26547C]">
+                      Traitement urgent (+{settings.urgentSurchargePercent}%)
+                    </div>
+                    <div className="text-xs text-slate-600">
+                      Passage prioritaire dès validation du paiement.
+                    </div>
+                  </div>
+                </label>
+              </div>
             </div>
 
             <div className="bg-[#EDF2F4] rounded-2xl p-5 space-y-2">
@@ -2444,7 +2337,7 @@ export const OrderWizard: React.FC<OrderWizardProps> = ({
               <div className="min-w-0 flex-1">
                 <div className="flex items-center gap-2 text-xs text-slate-600">
                   <span className="font-bold text-[#26547C] whitespace-nowrap">
-                    Étape {step}/4 · {stepShortTitles[step]}
+                    Étape {currentVisualStep}/{Math.max(1, totalVisualSteps - 1)} · {stepShortTitles[step]}
                   </span>
                   <span className="hidden sm:inline text-slate-300" aria-hidden="true">
                     ·
