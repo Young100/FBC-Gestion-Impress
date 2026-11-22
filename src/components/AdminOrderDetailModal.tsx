@@ -33,6 +33,7 @@ import {
   type OrderStatus,
   type ShopSettings,
 } from '../types/fbc';
+import { useToast } from './ToastProvider';
 
 interface AdminOrderDetailModalProps {
   order: Order;
@@ -61,6 +62,7 @@ export const AdminOrderDetailModal: React.FC<AdminOrderDetailModalProps> = ({
   onClose,
   onRefreshData,
 }) => {
+  const { showToast } = useToast();
   const [selectedStatus, setSelectedStatus] = useState<OrderStatus>(order.status);
   const [statusNote, setStatusNote] = useState('');
   const [correctionMsg, setCorrectionMsg] = useState(order.correctionRequestMessage || '');
@@ -111,6 +113,14 @@ export const AdminOrderDetailModal: React.FC<AdminOrderDetailModalProps> = ({
         });
       }
       setStatusNote('');
+      showToast({
+        id: `modal_status_${order.orderId}_${selectedStatus}`,
+        badge: order.orderNumber,
+        title: `Statut mis à jour : ${ORDER_STATUS_META[selectedStatus].label}`,
+        message: `Le suivi client de ${order.customerName} a été actualisé en temps réel.`,
+        variant: 'success',
+        durationMs: 5000,
+      });
     } catch (err) {
       setActionError(
         err instanceof Error ? err.message : 'Erreur lors du changement de statut.'
@@ -145,6 +155,14 @@ export const AdminOrderDetailModal: React.FC<AdminOrderDetailModalProps> = ({
       } else {
         await adminUpdateOrderFields(order.orderId, updates);
       }
+      showToast({
+        id: `modal_meta_${order.orderId}`,
+        badge: order.orderNumber,
+        title: 'Informations enregistrées',
+        message: 'Notes internes, échéance et tarification mises à jour.',
+        variant: 'success',
+        durationMs: 4500,
+      });
     } catch (err) {
       setActionError(
         err instanceof Error ? err.message : 'Erreur lors de l’enregistrement.'

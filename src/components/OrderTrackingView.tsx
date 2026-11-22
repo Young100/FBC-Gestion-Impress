@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import {
   AlertCircle,
+  BellRing,
   Check,
   CheckCircle2,
   Copy,
@@ -9,8 +10,23 @@ import {
   MessageCircle,
   Search,
   UploadCloud,
+  Volume2,
+  VolumeX,
   Wallet,
 } from 'lucide-react';
+import {
+  CLIENT_PREF_KEY,
+  CLIENT_SOUND_KEY,
+  dispatchNativeNotification,
+  getBrowserNotifPermission,
+  isAudioChimeEnabled,
+  isBrowserNotifEnabled,
+  playNotificationChime,
+  requestBrowserNotifPermission,
+  setAudioChimeEnabled,
+  setBrowserNotifEnabled,
+  type BrowserNotifPermission,
+} from '../lib/browserNotifications';
 import { reuploadCorrectedFile } from '../lib/firestoreApi';
 import { generateQuotePdf, generateReceiptPdf } from '../lib/pdfGenerator';
 import {
@@ -63,6 +79,15 @@ export const OrderTrackingView: React.FC<OrderTrackingViewProps> = ({
   const [reuploadingSlot, setReuploadingSlot] = useState<string | null>(null);
   const [reuploadProgress, setReuploadProgress] = useState<number>(0);
   const [reuploadError, setReuploadError] = useState<string | null>(null);
+  const [notifPermission, setNotifPermission] = useState<BrowserNotifPermission>(() =>
+    getBrowserNotifPermission()
+  );
+  const [browserNotifEnabled, setBrowserNotifEnabledState] = useState<boolean>(() =>
+    isBrowserNotifEnabled(CLIENT_PREF_KEY)
+  );
+  const [soundEnabled, setSoundEnabledState] = useState<boolean>(() =>
+    isAudioChimeEnabled(CLIENT_SOUND_KEY)
+  );
 
   const handleSearch = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -187,6 +212,113 @@ export const OrderTrackingView: React.FC<OrderTrackingViewProps> = ({
     });
   };
 
+  const handleToggleClientPopups = async () => {
+    const current = getBrowserNotifPermission();
+    setNotifPermission(current);
+
+    if (current === 'unsupported') {
+      showToast({
+        id: 'client_notif_unsupported',
+        title: 'Pop-up intégrées actives',
+        message:
+          'Votre navigateur ne prend pas en charge les notifications système, mais les pop-up à l’écran s’affichent en direct.',
+        variant: 'info',
+        durationMs: 5500,
+      });
+      return;
+    }
+
+    if (current === 'denied') {
+      showToast({
+        id: 'client_notif_denied',
+        title: 'Notifications bloquées',
+        message:
+          'Autorisez les notifications dans les réglages du navigateur pour recevoir les alertes hors écran.',
+        variant: 'warning',
+        durationMs: 7000,
+      });
+      return;
+    }
+
+    if (current === 'granted') {
+      const next = !browserNotifEnabled;
+      setBrowserNotifEnabled(CLIENT_PREF_KEY, next);
+      setBrowserNotifEnabledState(next);
+      if (next) {
+        if (soundEnabled) playNotificationChime('success');
+        showToast({
+          id: 'client_notif_enabled',
+          badge: order.orderNumber,
+          title: 'Alertes pop-up activées',
+          message:
+            'Vous serez alerté dès que le statut de votre commande évolue.',
+          variant: 'success',
+          durationMs: 5000,
+        });
+        void dispatchNativeNotification({
+          title: `Suivi ${order.orderNumber} activé`,
+          body: 'Vous recevrez une notification à chaque étape (paiement, production, retrait).',
+          tag: `fbc-client-welcome-${order.orderId}`,
+          icon: '/pwa-192x192.png',
+          badge: '/pwa-192x192.png',
+          url: `/client/?track=${encodeURIComponent(order.orderId)}`,
+          swScope: '/client/',
+        });
+      } else {
+        showToast({
+          id: 'client_notif_paused',
+          title: 'Alertes système en pause',
+          message: 'Les pop-up intégrées à la page restent actives.',
+          variant: 'info',
+          durationMs: 4000,
+        });
+      }
+      return;
+    }
+
+    const result = await requestBrowserNotifPermission(CLIENT_PREF_KEY);
+    setNotifPermission(result);
+    if (result === 'granted') {
+      setBrowserNotifEnabledState(true);
+      if (soundEnabled) playNotificationChime('success');
+      showToast({
+        id: 'client_notif_granted',
+        badge: order.orderNumber,
+        title: 'Alertes pop-up activées !',
+        message:
+          'Vous serez notifié en temps réel pour votre paiement, la mise en production et le retrait.',
+        variant: 'success',
+        durationMs: 6000,
+      });
+      void dispatchNativeNotification({
+        title: `Suivi ${order.orderNumber} activé`,
+        body: 'Les alertes pop-up sont prêtes pour votre commande FBC Print.',
+        tag: `fbc-client-welcome-${order.orderId}`,
+        icon: '/pwa-192x192.png',
+        badge: '/pwa-192x192.png',
+        url: `/client/?track=${encodeURIComponent(order.orderId)}`,
+        swScope: '/client/',
+      });
+    } else if (result === 'denied') {
+      setBrowserNotifEnabledState(false);
+      showToast({
+        id: 'client_notif_blocked',
+        title: 'Permission refusée',
+        message:
+          'Seules les notifications pop-up affichées dans cette page seront visibles.',
+        variant: 'warning',
+        durationMs: 6500,
+      });
+    }
+  };
+
+  const handleToggleClientSound = () => {
+    const next = !soundEnabled;
+    setAudioChimeEnabled(CLIENT_SOUND_KEY, next);
+    setSoundEnabledState(next);
+    if (next) playNotificationChime('info');
+  };
+
   const handleReupload = async (oldFileId: string, itemId: string, slotKey: string, slotLabel: string, prevVersion: number, file: File) => {
     setReuploadError(null);
     setReuploadingSlot(oldFileId);
@@ -246,7 +378,48 @@ export const OrderTrackingView: React.FC<OrderTrackingViewProps> = ({
             </p>
           </div>
 
-          <div className="flex flex-wrap items-center gap-2.5">
+          <div className="flex flex-wrap items-center gap-2">
+            {notifPermission !== 'unsupported' && (
+              <button
+                type="button"
+                onClick={handleToggleClientPopups}
+                className={`inline-flex items-center gap-1.5 px-4 py-2.5 rounded-full text-sm font-semibold transition-colors min-h-[44px] ${
+                  browserNotifEnabled && notifPermission === 'granted'
+                    ? 'bg-[#2E9E6B]/15 text-[#237A52] hover:bg-[#2E9E6B]/25'
+                    : notifPermission === 'denied'
+                      ? 'bg-amber-50 text-amber-800 border border-amber-200 hover:bg-amber-100'
+                      : 'bg-[#119DA4] text-white hover:bg-[#0e848a]'
+                }`}
+              >
+                <BellRing className="w-4 h-4 shrink-0" />
+                {browserNotifEnabled && notifPermission === 'granted'
+                  ? 'Alertes pop-up actives'
+                  : notifPermission === 'denied'
+                    ? 'Pop-up bloquées'
+                    : 'Activer les alertes pop-up'}
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={handleToggleClientSound}
+              className={`p-2.5 rounded-full min-h-[44px] min-w-[44px] flex items-center justify-center transition-colors ${
+                soundEnabled
+                  ? 'bg-[#EDF2F4] text-[#26547C] hover:bg-[#119DA4]/15'
+                  : 'bg-slate-100 text-slate-400 hover:text-slate-600'
+              }`}
+              aria-label={
+                soundEnabled ? 'Couper le son des alertes' : 'Activer le son des alertes'
+              }
+              title={
+                soundEnabled ? 'Son des alertes activé' : 'Son des alertes coupé'
+              }
+            >
+              {soundEnabled ? (
+                <Volume2 className="w-4 h-4" />
+              ) : (
+                <VolumeX className="w-4 h-4" />
+              )}
+            </button>
             <button
               type="button"
               onClick={handleCopyTracking}

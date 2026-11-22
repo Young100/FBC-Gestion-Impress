@@ -11,6 +11,15 @@ import {
   extractOrderSnapshot,
   type OrderSnapshotState,
 } from './lib/orderNotifications';
+import {
+  CLIENT_PREF_KEY,
+  CLIENT_SOUND_KEY,
+  dispatchNativeNotification,
+  getBrowserNotifPermission,
+  isAudioChimeEnabled,
+  isBrowserNotifEnabled,
+  playNotificationChime,
+} from './lib/browserNotifications';
 import type { Order, PaymentMethod, PrintService, ShopSettings } from './types/fbc';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { Header, type AppView } from './components/Header';
@@ -110,6 +119,25 @@ function AppContent() {
         });
         for (const toast of notifications) {
           showToast(toast);
+          if (isAudioChimeEnabled(CLIENT_SOUND_KEY)) {
+            playNotificationChime(toast.variant || 'info');
+          }
+          if (
+            isBrowserNotifEnabled(CLIENT_PREF_KEY) &&
+            getBrowserNotifPermission() === 'granted'
+          ) {
+            void dispatchNativeNotification({
+              title: `${ord.orderNumber} — ${toast.title}`,
+              body: toast.message,
+              tag: toast.id,
+              icon: '/pwa-192x192.png',
+              badge: '/pwa-192x192.png',
+              url: `/client/?track=${encodeURIComponent(ord.orderId)}`,
+              swScope: '/client/',
+              requireInteraction:
+                ord.status === 'fichier_a_corriger' || ord.status === 'prete',
+            });
+          }
         }
       }
       prevOrderSnapshotRef.current = extractOrderSnapshot(ord);

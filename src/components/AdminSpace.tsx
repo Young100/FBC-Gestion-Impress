@@ -4,6 +4,7 @@ import {
   AlertTriangle,
   ArrowUpRight,
   Bell,
+  BellRing,
   Check,
   CheckCircle2,
   ChevronDown,
@@ -17,6 +18,8 @@ import {
   Plus,
   Search,
   Shield,
+  Volume2,
+  VolumeX,
   Wallet,
   X,
   XCircle,
@@ -71,6 +74,25 @@ import {
 import { AdminOrderDetailModal } from './AdminOrderDetailModal';
 import { AdminSettingsTabs } from './AdminSettingsTabs';
 import { DashboardCharts } from './DashboardCharts';
+import { useToast } from './ToastProvider';
+import {
+  buildAdminChangeAlerts,
+  extractAdminSnapshot,
+  type AdminSnapshotState,
+} from '../lib/adminNotifications';
+import {
+  ATELIER_PREF_KEY,
+  ATELIER_SOUND_KEY,
+  dispatchNativeNotification,
+  getBrowserNotifPermission,
+  isAudioChimeEnabled,
+  isBrowserNotifEnabled,
+  playNotificationChime,
+  requestBrowserNotifPermission,
+  setAudioChimeEnabled,
+  setBrowserNotifEnabled,
+  type BrowserNotifPermission,
+} from '../lib/browserNotifications';
 
 interface AdminSpaceProps {
   services: PrintService[];
@@ -111,8 +133,24 @@ export const AdminSpace: React.FC<AdminSpaceProps> = ({
   const [clients, setClients] = useState<ClientProfile[]>([]);
   const [auditLogs, setAuditLogs] = useState<AuditLog[]>([]);
 
+  const { showToast } = useToast();
   const [selectedOrderId, setSelectedOrderId] = useState<string | null>(null);
   const [showNotifications, setShowNotifications] = useState(false);
+
+  const [notifPermission, setNotifPermission] = useState<BrowserNotifPermission>(() =>
+    getBrowserNotifPermission()
+  );
+  const [browserNotifEnabled, setBrowserNotifEnabledState] = useState<boolean>(() =>
+    isBrowserNotifEnabled(ATELIER_PREF_KEY)
+  );
+  const [soundEnabled, setSoundEnabledState] = useState<boolean>(() =>
+    isAudioChimeEnabled(ATELIER_SOUND_KEY)
+  );
+
+  const ordersReadyRef = useRef(false);
+  const paymentsReadyRef = useRef(false);
+  const prevSnapshotRef = useRef<AdminSnapshotState | null>(null);
+  const snapshotUidRef = useRef<string | null>(null);
 
   // Orders filters
   const [orderSearch, setOrderSearch] = useState('');
@@ -253,6 +291,8 @@ export const AdminSpace: React.FC<AdminSpaceProps> = ({
       setPayments(Array.isArray(data.payments) ? data.payments : []);
       setClients(Array.isArray(data.clients) ? data.clients : []);
       setAuditLogs(Array.isArray(data.auditLogs) ? data.auditLogs : []);
+      ordersReadyRef.current = true;
+      paymentsReadyRef.current = true;
       setDataError(null);
     } catch (err) {
       setDataError(
@@ -263,17 +303,40 @@ export const AdminSpace: React.FC<AdminSpaceProps> = ({
 
   // Subscribe to Firestore collections (Google Auth) or poll server API (credentials Auth)
   useEffect(() => {
-    if (!staffUser) return;
+    if (!staffUser) {
+      ordersReadyRef.current = false;
+      paymentsReadyRef.current = false;
+      prevSnapshotRef.current = null;
+      snapshotUidRef.current = null;
+      setOrders([]);
+      setPayments([]);
+      setClients([]);
+      setAuditLogs([]);
+      return;
+    }
+
+    if (snapshotUidRef.current !== staffUser.uid) {
+      ordersReadyRef.current = false;
+      paymentsReadyRef.current = false;
+      prevSnapshotRef.current = null;
+      snapshotUidRef.current = staffUser.uid;
+    }
 
     if (staffUser.authMethod === 'credentials') {
       refreshCredentialsData();
-      const intervalId = window.setInterval(refreshCredentialsData, 10000);
+      const intervalId = window.setInterval(refreshCredentialsData, 8000);
       return () => window.clearInterval(intervalId);
     }
 
     const unsubs = [
-      subscribeAdminOrders(setOrders),
-      subscribeAdminPayments(setPayments),
+      subscribeAdminOrders((nextOrders) => {
+        ordersReadyRef.current = true;
+        setOrders(nextOrders);
+      }),
+      subscribeAdminPayments((nextPayments) => {
+        paymentsReadyRef.current = true;
+        setPayments(nextPayments);
+      }),
       subscribeAdminClients(setClients),
     ];
     if (staffUser.role === 'admin') {
@@ -281,6 +344,174 @@ export const AdminSpace: React.FC<AdminSpaceProps> = ({
     }
     return () => unsubs.forEach((u) => u());
   }, [staffUser, refreshCredentialsData]);
+
+  // Real-time pop-up notifications for Admin & Operator on incoming orders, payments & file re-uploads
+  useEffect(() => {
+    if (!staffUser) return;
+    if (!ordersReadyRef.current || !paymentsReadyRef.current) return;
+
+    const prev = prevSnapshotRef.current;
+    if (!prev) {
+      prevSnapshotRef.current = extractAdminSnapshot(orders, payments);
+      return;
+    }
+
+    const alerts = buildAdminChangeAlerts({
+      prev,
+      nextOrders: orders,
+      nextPayments: payments,
+      ordersReady: ordersReadyRef.current,
+      paymentsReady: paymentsReadyRef.current,
+      staffRole: staffUser.role,
+      staffEmail: staffUser.email,
+      onOpenOrder: (orderId) => setSelectedOrderId(orderId),
+      onOpenPaymentsTab: () => setActiveTab('payments'),
+    });
+
+    prevSnapshotRef.current = extractAdminSnapshot(orders, payments);
+
+    if (alerts.length === 0) return;
+
+    if (soundEnabled) {
+      const hasUrgent = alerts.some(
+        (a) => a.toast.variant === 'error' || a.toast.variant === 'warning'
+      );
+      playNotificationChime(hasUrgent ? 'warning' : 'info');
+    }
+
+    for (const alert of alerts) {
+      showToast(alert.toast);
+      if (browserNotifEnabled && getBrowserNotifPermission() === 'granted') {
+        void dispatchNativeNotification({
+          title: alert.nativeTitle,
+          body: alert.nativeBody,
+          tag: alert.nativeTag,
+          icon: '/atelier-192x192.png',
+          badge: '/atelier-192x192.png',
+          url: alert.nativeUrl,
+          swScope: '/fbcprintgestionadmin/',
+          requireInteraction: alert.requireInteraction,
+        });
+      }
+    }
+  }, [orders, payments, staffUser, showToast, soundEnabled, browserNotifEnabled]);
+
+  const handleToggleBrowserPopups = async () => {
+    const currentPerm = getBrowserNotifPermission();
+    setNotifPermission(currentPerm);
+
+    if (currentPerm === 'unsupported') {
+      showToast({
+        id: 'atelier_notif_unsupported',
+        title: 'Pop-up navigateur indisponibles',
+        message:
+          'Votre navigateur actuel ne supporte pas les notifications système, mais les alertes pop-up intégrées restent actives.',
+        variant: 'info',
+        durationMs: 6000,
+      });
+      return;
+    }
+
+    if (currentPerm === 'denied') {
+      showToast({
+        id: 'atelier_notif_denied',
+        title: 'Notifications bloquées',
+        message:
+          'Autorisez les notifications pour ce site dans les paramètres de votre navigateur (icône cadenas à côté de l’adresse).',
+        variant: 'warning',
+        durationMs: 8000,
+      });
+      return;
+    }
+
+    if (currentPerm === 'granted') {
+      const next = !browserNotifEnabled;
+      setBrowserNotifEnabled(ATELIER_PREF_KEY, next);
+      setBrowserNotifEnabledState(next);
+      if (next) {
+        if (soundEnabled) playNotificationChime('success');
+        showToast({
+          id: 'atelier_notif_on',
+          title: 'Alertes pop-up activées',
+          message:
+            'Vous recevrez les notifications même lorsque l’application est en arrière-plan.',
+          variant: 'success',
+          durationMs: 5000,
+        });
+        void dispatchNativeNotification({
+          title: 'FBC Atelier — Alertes actives',
+          body: 'Les pop-up temps réel pour les commandes et paiements sont activées.',
+          tag: 'fbc-atelier-test',
+          icon: '/atelier-192x192.png',
+          badge: '/atelier-192x192.png',
+          url: '/fbcprintgestionadmin/',
+          swScope: '/fbcprintgestionadmin/',
+        });
+      } else {
+        showToast({
+          id: 'atelier_notif_muted',
+          title: 'Alertes système en pause',
+          message:
+            'Seules les notifications pop-up dans l’application resteront affichées.',
+          variant: 'info',
+          durationMs: 4500,
+        });
+      }
+      return;
+    }
+
+    const result = await requestBrowserNotifPermission(ATELIER_PREF_KEY);
+    setNotifPermission(result);
+    if (result === 'granted') {
+      setBrowserNotifEnabledState(true);
+      if (soundEnabled) playNotificationChime('success');
+      showToast({
+        id: 'atelier_notif_granted',
+        title: 'Alertes pop-up activées !',
+        message:
+          'Nouvelles commandes, fichiers corrigés et paiements à vérifier s’afficheront en pop-up.',
+        variant: 'success',
+        durationMs: 6000,
+      });
+      void dispatchNativeNotification({
+        title: 'FBC Atelier — Alertes activées',
+        body: 'Vous recevrez désormais les notifications en temps réel.',
+        tag: 'fbc-atelier-welcome',
+        icon: '/atelier-192x192.png',
+        badge: '/atelier-192x192.png',
+        url: '/fbcprintgestionadmin/',
+        swScope: '/fbcprintgestionadmin/',
+      });
+    } else if (result === 'denied') {
+      setBrowserNotifEnabledState(false);
+      showToast({
+        id: 'atelier_notif_blocked',
+        title: 'Permission refusée',
+        message:
+          'Les notifications navigateur ont été refusées. Les pop-up intégrées à l’atelier restent actives.',
+        variant: 'warning',
+        durationMs: 7000,
+      });
+    }
+  };
+
+  const handleToggleSound = () => {
+    const next = !soundEnabled;
+    setAudioChimeEnabled(ATELIER_SOUND_KEY, next);
+    setSoundEnabledState(next);
+    if (next) {
+      playNotificationChime('info');
+    }
+    showToast({
+      id: 'atelier_sound_toggle',
+      title: next ? 'Son des alertes activé' : 'Son des alertes coupé',
+      message: next
+        ? 'Un signal sonore discret accompagnera les nouvelles alertes atelier.'
+        : 'Les alertes pop-up resteront silencieuses.',
+      variant: 'info',
+      durationMs: 3500,
+    });
+  };
 
   const handleCredentialSignIn = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -536,16 +767,27 @@ export const AdminSpace: React.FC<AdminSpaceProps> = ({
     };
 
     try {
+      let createdOrderNumber = '';
       if (staffUser?.authMethod === 'credentials') {
-        await createManualOrderServer(orderPayload);
+        const res = await createManualOrderServer(orderPayload);
+        createdOrderNumber = res.orderNumber;
         await refreshCredentialsData();
       } else {
-        await createOrderInFirestore(orderPayload);
+        const created = await createOrderInFirestore(orderPayload);
+        createdOrderNumber = created.orderNumber;
       }
       setShowManualModal(false);
       setManualName('');
       setManualPhone('');
       setManualNotes('');
+      showToast({
+        id: `manual_order_${Date.now()}`,
+        badge: createdOrderNumber || undefined,
+        title: 'Commande manuelle enregistrée',
+        message: `${orderPayload.customerName} · ${srv.name}`,
+        variant: 'success',
+        durationMs: 6000,
+      });
     } catch (err) {
       setManualError(
         err instanceof Error ? err.message : 'Erreur lors de la création de la commande.'
@@ -733,7 +975,55 @@ export const AdminSpace: React.FC<AdminSpaceProps> = ({
           </div>
         </div>
 
-        <div className="flex items-center gap-3 self-end md:self-auto relative">
+        <div className="flex flex-wrap items-center gap-2 sm:gap-2.5 self-end md:self-auto relative">
+          {/* Pop-up System Notifications Opt-in / Status */}
+          {notifPermission !== 'unsupported' && (
+            <button
+              type="button"
+              onClick={handleToggleBrowserPopups}
+              className={`inline-flex items-center gap-1.5 px-3.5 py-2 rounded-full text-xs font-semibold transition-colors min-h-[44px] ${
+                browserNotifEnabled && notifPermission === 'granted'
+                  ? 'bg-[#2E9E6B]/15 text-[#237A52] hover:bg-[#2E9E6B]/25'
+                  : notifPermission === 'denied'
+                    ? 'bg-amber-50 text-amber-800 border border-amber-200 hover:bg-amber-100'
+                    : 'bg-[#119DA4]/12 text-[#0E7F85] hover:bg-[#119DA4]/20'
+              }`}
+              title="Configurer les notifications pop-up système"
+            >
+              <BellRing className="w-4 h-4 shrink-0" />
+              <span className="hidden sm:inline">
+                {browserNotifEnabled && notifPermission === 'granted'
+                  ? 'Pop-up actives'
+                  : notifPermission === 'denied'
+                    ? 'Pop-up bloquées'
+                    : 'Activer pop-up'}
+              </span>
+            </button>
+          )}
+
+          {/* Sound Toggle */}
+          <button
+            type="button"
+            onClick={handleToggleSound}
+            className={`p-2.5 rounded-full min-h-[44px] min-w-[44px] flex items-center justify-center transition-colors ${
+              soundEnabled
+                ? 'bg-[#EDF2F4] text-[#26547C] hover:bg-[#119DA4]/15'
+                : 'bg-slate-100 text-slate-400 hover:text-slate-600'
+            }`}
+            aria-label={
+              soundEnabled ? 'Couper le son des alertes' : 'Activer le son des alertes'
+            }
+            title={
+              soundEnabled ? 'Son des alertes activé' : 'Son des alertes coupé'
+            }
+          >
+            {soundEnabled ? (
+              <Volume2 className="w-4 h-4" />
+            ) : (
+              <VolumeX className="w-4 h-4" />
+            )}
+          </button>
+
           {/* Notification Bell */}
           <button
             type="button"
@@ -769,6 +1059,9 @@ export const AdminSpace: React.FC<AdminSpaceProps> = ({
                       className="w-full text-left py-2 hover:text-[#119DA4]"
                     >
                       Nouvelle commande <strong>{o.orderNumber}</strong> · {o.customerName}
+                      {o.urgent && (
+                        <span className="ml-1.5 text-[#EF233C] font-bold">URGENT</span>
+                      )}
                     </button>
                   ))}
                 {isAdmin &&
@@ -1362,6 +1655,14 @@ export const AdminSpace: React.FC<AdminSpaceProps> = ({
                                     actorRole: staffUser.role,
                                   });
                                 }
+                                showToast({
+                                  id: `payment_validated_${pay.paymentId}`,
+                                  badge: pay.orderNumber,
+                                  title: 'Paiement validé',
+                                  message: `${formatFcfa(pay.declaredAmount)} confirmés pour ${pay.customerName}.`,
+                                  variant: 'success',
+                                  durationMs: 6000,
+                                });
                               } catch (err) {
                                 setDataError(
                                   err instanceof Error
@@ -1735,6 +2036,14 @@ export const AdminSpace: React.FC<AdminSpaceProps> = ({
                           actorRole: staffUser.role,
                         });
                       }
+                      showToast({
+                        id: `payment_rejected_${rejectTarget.paymentId}`,
+                        badge: rejectTarget.orderNumber,
+                        title: 'Paiement rejeté',
+                        message: `${rejectTarget.customerName} a été notifié du rejet.`,
+                        variant: 'warning',
+                        durationMs: 6000,
+                      });
                       setRejectTarget(null);
                     } catch (err) {
                       setDataError(

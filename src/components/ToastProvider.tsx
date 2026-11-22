@@ -242,7 +242,7 @@ export const ToastProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       {children}
       <div
         aria-label="Notifications en temps réel"
-        className="pointer-events-none fixed z-50 top-20 inset-x-3 sm:inset-x-auto sm:right-6 sm:w-[390px] flex flex-col gap-2.5"
+        className="pointer-events-none fixed z-[80] top-20 inset-x-3 sm:inset-x-auto sm:right-6 sm:w-[400px] flex flex-col gap-2.5"
       >
         <AnimatePresence mode="popLayout">
           {toasts.map((toast) => (
