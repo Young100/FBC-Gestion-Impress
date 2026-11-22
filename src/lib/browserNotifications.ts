@@ -272,3 +272,258 @@ export async function dispatchNativeNotification(
     return false;
   }
 }
+
+function urlBase64ToUint8Array(base64String: string): Uint8Array {
+  const padding = '='.repeat((4 - (base64String.length % 4)) % 4);
+  const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
+  const rawData = window.atob(base64);
+  const outputArray = new Uint8Array(rawData.length);
+  for (let i = 0; i < rawData.length; ++i) {
+    outputArray[i] = rawData.charCodeAt(i);
+  }
+  return outputArray;
+}
+
+function arrayBufferToBase64Url(buffer: ArrayBuffer | null | undefined): string {
+  if (!buffer) return '';
+  const bytes = new Uint8Array(buffer);
+  let binary = '';
+  for (let i = 0; i < bytes.byteLength; i++) {
+    binary += String.fromCharCode(bytes[i]);
+  }
+  return window
+    .btoa(binary)
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_')
+    .replace(/=+$/, '');
+}
+
+let cachedVapidPublicKey: string | null = null;
+
+export async function getVapidPublicKey(): Promise<string | null> {
+  if (cachedVapidPublicKey) return cachedVapidPublicKey;
+  try {
+    const res = await fetch('/api/push/vapid-public-key', {
+      credentials: 'include',
+    });
+    if (!res.ok) return null;
+    const data = (await res.json()) as { publicKey?: string };
+    if (typeof data.publicKey === 'string' && data.publicKey.trim()) {
+      cachedVapidPublicKey = data.publicKey.trim();
+      return cachedVapidPublicKey;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+export async function findServiceWorkerRegistration(
+  swScope?: string
+): Promise<ServiceWorkerRegistration | null> {
+  if (typeof window === 'undefined' || !('serviceWorker' in navigator)) {
+    return null;
+  }
+
+  try {
+    const registrations = await navigator.serviceWorker.getRegistrations();
+    let matched = swScope
+      ? registrations.find((r) => {
+          try {
+            const path = new URL(r.scope).pathname;
+            return path === swScope || path.startsWith(swScope);
+          } catch {
+            return false;
+          }
+        })
+      : registrations[0];
+
+    if (!matched) {
+      const ready = await Promise.race([
+        navigator.serviceWorker.ready,
+        new Promise<undefined>((resolve) =>
+          window.setTimeout(() => resolve(undefined), 1500)
+        ),
+      ]);
+      if (ready) {
+        if (!swScope) {
+          matched = ready;
+        } else {
+          try {
+            const readyPath = new URL(ready.scope).pathname;
+            if (readyPath === swScope || readyPath.startsWith(swScope)) {
+              matched = ready;
+            }
+          } catch {
+            // Ignore malformed URL
+          }
+        }
+      }
+    }
+
+    if (!matched) return null;
+
+    if (!matched.active) {
+      const pending = matched.installing || matched.waiting;
+      if (pending) {
+        await new Promise<void>((resolve) => {
+          const timer = window.setTimeout(resolve, 2500);
+          pending.addEventListener('statechange', () => {
+            if (pending.state === 'activated' || matched?.active) {
+              window.clearTimeout(timer);
+              resolve();
+            }
+          });
+        });
+      }
+    }
+
+    return matched;
+  } catch {
+    return null;
+  }
+}
+
+export async function ensureWebPushSubscription(options: {
+  swScope: string;
+  subscribeUrl: string;
+  getHeaders: () => Promise<HeadersInit> | HeadersInit;
+}): Promise<boolean> {
+  if (
+    typeof window === 'undefined' ||
+    !('serviceWorker' in navigator) ||
+    !('PushManager' in window) ||
+    !('Notification' in window)
+  ) {
+    return false;
+  }
+  if (Notification.permission !== 'granted') {
+    return false;
+  }
+
+  try {
+    const reg = await findServiceWorkerRegistration(options.swScope);
+    if (!reg || !reg.active || !reg.pushManager) {
+      return false;
+    }
+
+    const publicKey = await getVapidPublicKey();
+    if (!publicKey) {
+      return false;
+    }
+
+    let sub = await reg.pushManager.getSubscription();
+    if (sub && sub.options?.applicationServerKey) {
+      const existingKeyB64 = arrayBufferToBase64Url(sub.options.applicationServerKey);
+      if (existingKeyB64 && existingKeyB64 !== publicKey) {
+        await sub.unsubscribe().catch(() => {});
+        sub = null;
+      }
+    }
+
+    if (!sub) {
+      const applicationServerKey = urlBase64ToUint8Array(publicKey);
+      sub = await reg.pushManager.subscribe({
+        userVisibleOnly: true,
+        applicationServerKey: applicationServerKey as BufferSource,
+      });
+    }
+
+    const json = sub.toJSON();
+    const endpoint = json.endpoint || sub.endpoint;
+    const p256dh = json.keys?.p256dh || arrayBufferToBase64Url(sub.getKey('p256dh'));
+    const auth = json.keys?.auth || arrayBufferToBase64Url(sub.getKey('auth'));
+    if (!endpoint || !p256dh || !auth) {
+      return false;
+    }
+
+    const headers = new Headers(await options.getHeaders());
+    if (!headers.has('Content-Type')) {
+      headers.set('Content-Type', 'application/json');
+    }
+
+    const res = await fetch(options.subscribeUrl, {
+      method: 'POST',
+      headers,
+      credentials: 'include',
+      body: JSON.stringify({
+        endpoint,
+        keys: { p256dh, auth },
+      }),
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+export async function unsubscribeWebPush(options: {
+  swScope: string;
+  unsubscribeUrl: string;
+  getHeaders: () => Promise<HeadersInit> | HeadersInit;
+}): Promise<void> {
+  if (
+    typeof window === 'undefined' ||
+    !('serviceWorker' in navigator) ||
+    !('PushManager' in window)
+  ) {
+    return;
+  }
+  try {
+    const reg = await findServiceWorkerRegistration(options.swScope);
+    if (!reg || !reg.pushManager) return;
+    const sub = await reg.pushManager.getSubscription();
+    if (!sub) return;
+
+    const headers = new Headers(await options.getHeaders());
+    if (!headers.has('Content-Type')) {
+      headers.set('Content-Type', 'application/json');
+    }
+
+    await fetch(options.unsubscribeUrl, {
+      method: 'POST',
+      headers,
+      credentials: 'include',
+      body: JSON.stringify({ endpoint: sub.endpoint }),
+    }).catch(() => {});
+
+    await sub.unsubscribe().catch(() => {});
+  } catch {
+    // Ignore unsubscribe errors
+  }
+}
+
+export async function syncAppIconBadge(
+  count: number,
+  swScope?: string
+): Promise<void> {
+  if (typeof window === 'undefined') return;
+  const safeCount = Math.max(0, Math.floor(count));
+
+  try {
+    const nav = navigator as Navigator & {
+      setAppBadge?: (contents?: number) => Promise<void>;
+      clearAppBadge?: () => Promise<void>;
+    };
+    if (safeCount > 0 && typeof nav.setAppBadge === 'function') {
+      await nav.setAppBadge(safeCount);
+    } else if (safeCount === 0 && typeof nav.clearAppBadge === 'function') {
+      await nav.clearAppBadge();
+    }
+  } catch {
+    // App Badging API may not be supported in this browser
+  }
+
+  try {
+    const reg = await findServiceWorkerRegistration(swScope);
+    if (reg && reg.active) {
+      reg.active.postMessage({
+        type: safeCount > 0 ? 'SET_BADGE' : 'CLEAR_BADGE',
+        count: safeCount,
+      });
+    }
+  } catch {
+    // Ignore SW postMessage errors
+  }
+}
+

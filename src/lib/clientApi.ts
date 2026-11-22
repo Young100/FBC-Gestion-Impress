@@ -1,4 +1,15 @@
-import type { ClientAccountPublic, Order, Payment, UploadedFileMeta } from '../types/fbc';
+import {
+  ensureWebPushSubscription,
+  syncAppIconBadge,
+  unsubscribeWebPush,
+} from './browserNotifications';
+import type {
+  ClientAccountPublic,
+  Order,
+  Payment,
+  ServerNotificationItem,
+  UploadedFileMeta,
+} from '../types/fbc';
 
 let inMemoryClientSessionToken: string | null = null;
 
@@ -155,6 +166,16 @@ export async function loginClientAccount(
 }
 
 export async function logoutClientAccount(): Promise<void> {
+  try {
+    await unsubscribeWebPush({
+      swScope: '/client/',
+      unsubscribeUrl: '/api/client/push/unsubscribe',
+      getHeaders: () => getClientAuthHeaders({ 'Content-Type': 'application/json' }),
+    });
+  } catch {
+    // Ignore push unsubscribe issues on logout
+  }
+  await syncAppIconBadge(0, '/client/');
   clearClientSessionToken();
   try {
     await clientFetch('/api/client/logout', { method: 'POST' });
@@ -268,3 +289,63 @@ export async function triggerClientProtectedDownload(
   a.remove();
   setTimeout(() => URL.revokeObjectURL(objectUrl), 10000);
 }
+
+export async function subscribeClientWebPush(): Promise<boolean> {
+  if (!inMemoryClientSessionToken) {
+    // Still works if httpOnly session cookie is active
+  }
+  return ensureWebPushSubscription({
+    swScope: '/client/',
+    subscribeUrl: '/api/client/push/subscribe',
+    getHeaders: () => getClientAuthHeaders({ 'Content-Type': 'application/json' }),
+  });
+}
+
+export async function unsubscribeClientWebPush(): Promise<void> {
+  await unsubscribeWebPush({
+    swScope: '/client/',
+    unsubscribeUrl: '/api/client/push/unsubscribe',
+    getHeaders: () => getClientAuthHeaders({ 'Content-Type': 'application/json' }),
+  });
+}
+
+export async function resetClientPushBadge(): Promise<void> {
+  await syncAppIconBadge(0, '/client/');
+  try {
+    await clientFetch('/api/client/push/badge-reset', { method: 'POST' });
+  } catch {
+    // Ignore badge reset network failures
+  }
+}
+
+export async function sendClientTestPush(): Promise<{ delivered: number }> {
+  const res = await clientFetch<{ delivered?: number }>('/api/client/push/test', {
+    method: 'POST',
+  });
+  return { delivered: Number(res.delivered || 0) };
+}
+
+export async function fetchClientNotifications(): Promise<{
+  notifications: ServerNotificationItem[];
+  unreadCount: number;
+}> {
+  const res = await clientFetch<{
+    notifications?: ServerNotificationItem[];
+    unreadCount?: number;
+  }>('/api/client/notifications');
+  return {
+    notifications: Array.isArray(res.notifications) ? res.notifications : [],
+    unreadCount: Number(res.unreadCount || 0),
+  };
+}
+
+export async function markClientNotificationsRead(notifId?: string): Promise<void> {
+  await clientFetch('/api/client/notifications/mark-read', {
+    method: 'POST',
+    body: JSON.stringify(notifId ? { notifId } : {}),
+  });
+  if (!notifId) {
+    await syncAppIconBadge(0, '/client/');
+  }
+}
+

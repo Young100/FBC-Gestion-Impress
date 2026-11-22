@@ -14,6 +14,7 @@ import {
 import {
   fetchStaffProtectedBlobUrl,
   getStaffAuthHeaders,
+  notifyOrderPushServer,
   triggerStaffProtectedDownload,
   updateOrderFieldsServer,
   updateOrderStatusServer,
@@ -152,6 +153,15 @@ export const AdminOrderDetailModal: React.FC<AdminOrderDetailModalProps> = ({
           newStatus: selectedStatus,
           actorEmail: staffUser.email,
           actorRole: staffUser.role,
+          note: statusNote,
+          correctionMessage:
+            selectedStatus === 'fichier_a_corriger' ? correctionMsg : undefined,
+          cancellationReason: selectedStatus === 'annulee' ? cancelReason : undefined,
+        });
+        void notifyOrderPushServer({
+          orderId: order.orderId,
+          eventType: 'status_changed',
+          newStatus: selectedStatus,
           note: statusNote,
           correctionMessage:
             selectedStatus === 'fichier_a_corriger' ? correctionMsg : undefined,

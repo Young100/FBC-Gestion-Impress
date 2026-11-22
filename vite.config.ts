@@ -5,12 +5,15 @@ import path from 'path';
 import {defineConfig} from 'vite';
 import {VitePWA} from 'vite-plugin-pwa';
 
-export default defineConfig(({command}) => {
+export default defineConfig(() => {
   return {
     plugins: [
       react(),
       tailwindcss(),
       VitePWA({
+        strategies: 'injectManifest',
+        srcDir: 'src',
+        filename: 'client-sw.ts',
         registerType: 'autoUpdate',
         scope: '/client/',
         includeAssets: [
@@ -55,46 +58,9 @@ export default defineConfig(({command}) => {
             },
           ],
         },
-        workbox: {
-          ...(command === 'build'
-            ? {importScripts: ['/client-sw-notifications.js']}
-            : {}),
+        injectManifest: {
           globPatterns: ['**/*.{js,css,html,ico,png,svg,woff2}'],
           maximumFileSizeToCacheInBytes: 5 * 1024 * 1024,
-          navigateFallback: '/index.html',
-          navigateFallbackAllowlist: [/^\/client(\/.*)?$/],
-          navigateFallbackDenylist: [
-            /^\/api\//,
-            /^\/fbcprintgestionadmin/,
-            /^\/server-views\//,
-          ],
-          runtimeCaching: [
-            {
-              urlPattern: /^https:\/\/fonts\.googleapis\.com\/.*/i,
-              handler: 'StaleWhileRevalidate',
-              options: {
-                cacheName: 'google-fonts-stylesheets',
-                expiration: {
-                  maxEntries: 10,
-                  maxAgeSeconds: 60 * 60 * 24 * 30,
-                },
-              },
-            },
-            {
-              urlPattern: /^https:\/\/fonts\.gstatic\.com\/.*/i,
-              handler: 'CacheFirst',
-              options: {
-                cacheName: 'google-fonts-webfonts',
-                expiration: {
-                  maxEntries: 20,
-                  maxAgeSeconds: 60 * 60 * 24 * 365,
-                },
-                cacheableResponse: {
-                  statuses: [0, 200],
-                },
-              },
-            },
-          ],
         },
         devOptions: {
           enabled: true,

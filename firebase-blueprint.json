@@ -257,6 +257,56 @@
         "lastReceiptSeq": { "type": "number" }
       },
       "required": ["lastOrderSeq", "lastQuoteSeq", "lastReceiptSeq"]
+    },
+    "PushSubscription": {
+      "title": "PushSubscription",
+      "description": "Abonnement Web Push (VAPID) isolé par client ou personnel atelier",
+      "type": "object",
+      "properties": {
+        "subId": { "type": "string", "maxLength": 128 },
+        "audience": { "type": "string", "enum": ["client", "atelier"] },
+        "clientAccountId": { "type": "string", "maxLength": 128 },
+        "staffUid": { "type": "string", "maxLength": 128 },
+        "staffRole": { "type": "string", "enum": ["admin", "operator"] },
+        "endpoint": { "type": "string", "maxLength": 1000 },
+        "p256dh": { "type": "string", "maxLength": 256 },
+        "auth": { "type": "string", "maxLength": 128 },
+        "unreadCount": { "type": "number" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["subId", "audience", "endpoint", "p256dh", "auth", "unreadCount", "createdAt", "updatedAt"]
+    },
+    "ServerNotification": {
+      "title": "ServerNotification",
+      "description": "Historique des notifications push pour le centre de notifications client et atelier",
+      "type": "object",
+      "properties": {
+        "notifId": { "type": "string", "maxLength": 128 },
+        "audience": { "type": "string", "enum": ["client", "atelier"] },
+        "clientAccountId": { "type": "string", "maxLength": 128 },
+        "minRole": { "type": "string", "enum": ["admin", "operator"] },
+        "orderId": { "type": "string", "maxLength": 128 },
+        "orderNumber": { "type": "string", "maxLength": 40 },
+        "trackingCode": { "type": "string", "maxLength": 40 },
+        "title": { "type": "string", "maxLength": 160 },
+        "body": { "type": "string", "maxLength": 500 },
+        "variant": { "type": "string", "enum": ["info", "success", "warning", "error"] },
+        "url": { "type": "string", "maxLength": 300 },
+        "read": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["notifId", "audience", "title", "body", "variant", "read", "createdAt"]
+    },
+    "ServerSecret": {
+      "title": "ServerSecret",
+      "description": "Clés techniques serveur (ex: VAPID) strictement inaccessibles au navigateur",
+      "type": "object",
+      "properties": {
+        "publicKey": { "type": "string", "maxLength": 256 },
+        "privateKey": { "type": "string", "maxLength": 256 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      }
     }
   },
   "firestore": {
@@ -311,6 +361,18 @@
     "/counters/{counterId}": {
       "schema": { "$ref": "#/entities/Counter" },
       "description": "Séquences continues de numérotation"
+    },
+    "/push_subscriptions/{subId}": {
+      "schema": { "$ref": "#/entities/PushSubscription" },
+      "description": "Abonnements Web Push gérés exclusivement côté serveur"
+    },
+    "/notifications/{notifId}": {
+      "schema": { "$ref": "#/entities/ServerNotification" },
+      "description": "Journal des notifications géré exclusivement côté serveur"
+    },
+    "/server_secrets/{secretId}": {
+      "schema": { "$ref": "#/entities/ServerSecret" },
+      "description": "Secrets cryptographiques gérés exclusivement côté serveur"
     }
   }
 }

@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { ExternalLink, ShieldCheck } from 'lucide-react';
 import { DEFAULT_PAYMENT_METHODS, DEFAULT_SERVICES, DEFAULT_SETTINGS } from './data/defaults';
-import { createManualOrderServer } from './lib/adminApi';
+import { createManualOrderServer, notifyOrderPushServer } from './lib/adminApi';
 import { auth } from './lib/firebase';
 import { createOrderInFirestore, subscribePublicCatalog } from './lib/firestoreApi';
 import type { Order, PaymentMethod, PrintService, ShopSettings } from './types/fbc';
@@ -60,9 +60,19 @@ export default function AdminApp() {
         source: 'manual_admin' as const,
       };
 
-      const createdNum = auth.currentUser
-        ? (await createOrderInFirestore(reprintPayload)).orderNumber
-        : (await createManualOrderServer(reprintPayload)).orderNumber;
+      let createdNum = '';
+      if (auth.currentUser) {
+        const created = await createOrderInFirestore(reprintPayload);
+        createdNum = created.orderNumber;
+        if (created.clientAccountId) {
+          void notifyOrderPushServer({
+            orderId: created.orderId,
+            eventType: 'manual_order',
+          });
+        }
+      } else {
+        createdNum = (await createManualOrderServer(reprintPayload)).orderNumber;
+      }
 
       setReprintNotice(
         `Réimpression créée avec succès : ${createdNum} (${order.customerName})`

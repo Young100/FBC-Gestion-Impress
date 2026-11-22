@@ -1,3 +1,8 @@
+import {
+  ensureWebPushSubscription,
+  syncAppIconBadge,
+  unsubscribeWebPush,
+} from './browserNotifications';
 import { auth } from './firebase';
 import {
   ORDER_STATUS_META,
@@ -11,6 +16,7 @@ import {
   type Payment,
   type PaymentMethod,
   type PrintService,
+  type ServerNotificationItem,
   type ShopSettings,
   type StaffCredentialPublic,
 } from '../types/fbc';
@@ -195,6 +201,16 @@ export async function loginWithStaffCredentials(
 }
 
 export async function logoutStaffSession(): Promise<void> {
+  try {
+    await unsubscribeWebPush({
+      swScope: '/fbcprintgestionadmin/',
+      unsubscribeUrl: '/api/admin/push/unsubscribe',
+      getHeaders: () => getStaffAuthHeaders({ 'Content-Type': 'application/json' }),
+    });
+  } catch {
+    // Ignore push unsubscribe error on logout
+  }
+  await syncAppIconBadge(0, '/fbcprintgestionadmin/');
   clearStaffSessionToken();
   await adminFetch('/api/staff/logout', { method: 'POST' });
 }
@@ -431,4 +447,86 @@ export async function toggleClientAccountActiveServer(
   );
   return res.account;
 }
+
+export async function subscribeAdminWebPush(): Promise<boolean> {
+  return ensureWebPushSubscription({
+    swScope: '/fbcprintgestionadmin/',
+    subscribeUrl: '/api/admin/push/subscribe',
+    getHeaders: () => getStaffAuthHeaders({ 'Content-Type': 'application/json' }),
+  });
+}
+
+export async function unsubscribeAdminWebPush(): Promise<void> {
+  await unsubscribeWebPush({
+    swScope: '/fbcprintgestionadmin/',
+    unsubscribeUrl: '/api/admin/push/unsubscribe',
+    getHeaders: () => getStaffAuthHeaders({ 'Content-Type': 'application/json' }),
+  });
+}
+
+export async function resetAdminPushBadge(): Promise<void> {
+  await syncAppIconBadge(0, '/fbcprintgestionadmin/');
+  try {
+    await adminFetch('/api/admin/push/badge-reset', { method: 'POST' });
+  } catch {
+    // Ignore badge reset error
+  }
+}
+
+export async function sendAdminTestPush(): Promise<{ delivered: number }> {
+  const res = await adminFetch<{ delivered?: number }>('/api/admin/push/test', {
+    method: 'POST',
+  });
+  return { delivered: Number(res.delivered || 0) };
+}
+
+export async function notifyOrderPushServer(params: {
+  orderId: string;
+  eventType: 'status_changed' | 'payment_validated' | 'payment_rejected' | 'manual_order';
+  newStatus?: OrderStatus;
+  note?: string;
+  correctionMessage?: string;
+  cancellationReason?: string;
+  amount?: number;
+  methodName?: string;
+  receiptNumber?: string;
+  reason?: string;
+}): Promise<void> {
+  try {
+    await adminFetch('/api/admin/push/notify-order', {
+      method: 'POST',
+      body: JSON.stringify({
+        ...params,
+        statusLabel: params.newStatus ? ORDER_STATUS_META[params.newStatus].label : undefined,
+      }),
+    });
+  } catch {
+    // Never block admin action if push notification fails
+  }
+}
+
+export async function fetchAdminNotifications(): Promise<{
+  notifications: ServerNotificationItem[];
+  unreadCount: number;
+}> {
+  const res = await adminFetch<{
+    notifications?: ServerNotificationItem[];
+    unreadCount?: number;
+  }>('/api/admin/notifications');
+  return {
+    notifications: Array.isArray(res.notifications) ? res.notifications : [],
+    unreadCount: Number(res.unreadCount || 0),
+  };
+}
+
+export async function markAdminNotificationsRead(notifId?: string): Promise<void> {
+  await adminFetch('/api/admin/notifications/mark-read', {
+    method: 'POST',
+    body: JSON.stringify(notifId ? { notifId } : {}),
+  });
+  if (!notifId) {
+    await syncAppIconBadge(0, '/fbcprintgestionadmin/');
+  }
+}
+
 

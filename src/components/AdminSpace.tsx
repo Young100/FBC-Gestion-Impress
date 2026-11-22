@@ -6,6 +6,7 @@ import {
   Bell,
   BellRing,
   Check,
+  CheckCheck,
   CheckCircle2,
   ChevronDown,
   Clock,
@@ -28,12 +29,18 @@ import {
   clearStaffSessionToken,
   createManualOrderServer,
   fetchAdminBootstrap,
+  fetchAdminNotifications,
   fetchStaffProtectedBlobUrl,
   fetchStaffSession,
   loginWithStaffCredentials,
   logoutStaffSession,
+  markAdminNotificationsRead,
+  notifyOrderPushServer,
   rejectPaymentServer,
   savePaymentMethodServer,
+  sendAdminTestPush,
+  subscribeAdminWebPush,
+  unsubscribeAdminWebPush,
   validatePaymentServer,
 } from '../lib/adminApi';
 import {
@@ -70,6 +77,7 @@ import {
   type Payment,
   type PaymentMethod,
   type PrintService,
+  type ServerNotificationItem,
   type ShopSettings,
 } from '../types/fbc';
 import { AdminOrderDetailModal } from './AdminOrderDetailModal';
@@ -94,6 +102,7 @@ import {
   requestBrowserNotifPermission,
   setAudioChimeEnabled,
   setBrowserNotifEnabled,
+  syncAppIconBadge,
   type BrowserNotifPermission,
 } from '../lib/browserNotifications';
 
@@ -139,6 +148,9 @@ export const AdminSpace: React.FC<AdminSpaceProps> = ({
   const { showToast } = useToast();
   const [selectedOrderId, setSelectedOrderId] = useState<string | null>(null);
   const [showNotifications, setShowNotifications] = useState(false);
+  const notifBoxRef = useRef<HTMLDivElement | null>(null);
+  const [adminNotifications, setAdminNotifications] = useState<ServerNotificationItem[]>([]);
+  const [unreadServerNotifs, setUnreadServerNotifs] = useState(0);
 
   const [notifPermission, setNotifPermission] = useState<BrowserNotifPermission>(() =>
     getBrowserNotifPermission()
@@ -160,6 +172,24 @@ export const AdminSpace: React.FC<AdminSpaceProps> = ({
   useEffect(() => {
     return initAudioUnlock();
   }, []);
+
+  useEffect(() => {
+    if (!showNotifications) return;
+    const handlePointerDown = (e: MouseEvent) => {
+      if (notifBoxRef.current && !notifBoxRef.current.contains(e.target as Node)) {
+        setShowNotifications(false);
+      }
+    };
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setShowNotifications(false);
+    };
+    document.addEventListener('mousedown', handlePointerDown);
+    document.addEventListener('keydown', handleKeyDown);
+    return () => {
+      document.removeEventListener('mousedown', handlePointerDown);
+      document.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [showNotifications]);
 
   const ordersReadyRef = useRef(false);
   const paymentsReadyRef = useRef(false);
@@ -243,6 +273,8 @@ export const AdminSpace: React.FC<AdminSpaceProps> = ({
   const handleSignOut = useCallback(async () => {
     setAuthError(null);
     setDataError(null);
+    setAdminNotifications([]);
+    setUnreadServerNotifs(0);
     await logoutStaffSession().catch(() => {});
     await signOut(auth).catch(() => {});
     setStaffUser(null);
@@ -356,6 +388,59 @@ export const AdminSpace: React.FC<AdminSpaceProps> = ({
     }
   }, []);
 
+  const loadAdminNotifications = useCallback(async () => {
+    try {
+      const res = await fetchAdminNotifications();
+      setAdminNotifications(res.notifications);
+      setUnreadServerNotifs(res.unreadCount);
+      void syncAppIconBadge(res.unreadCount, '/fbcprintgestionadmin/');
+    } catch {
+      // Ignore transient notification fetch failures
+    }
+  }, []);
+
+  // Auto-subscribe Web Push, sync URL deep-links, and poll Notification Center when staff is signed in
+  useEffect(() => {
+    if (!staffUser) {
+      setAdminNotifications([]);
+      setUnreadServerNotifs(0);
+      return;
+    }
+
+    const params = new URLSearchParams(window.location.search);
+    const orderParam = params.get('order')?.trim();
+    const tabParam = params.get('tab')?.trim();
+    if (orderParam) {
+      setSelectedOrderId(orderParam);
+      window.history.replaceState({}, '', '/fbcprintgestionadmin/');
+    } else if (tabParam === 'payments' && staffUser.role === 'admin') {
+      setActiveTab('payments');
+      window.history.replaceState({}, '', '/fbcprintgestionadmin/');
+    }
+
+    void loadAdminNotifications();
+    if (
+      getBrowserNotifPermission() === 'granted' &&
+      isBrowserNotifEnabled(ATELIER_PREF_KEY)
+    ) {
+      void subscribeAdminWebPush();
+    }
+
+    const intervalId = window.setInterval(() => {
+      void loadAdminNotifications();
+    }, 8000);
+    const handleVisibility = () => {
+      if (document.visibilityState === 'visible') {
+        void loadAdminNotifications();
+      }
+    };
+    document.addEventListener('visibilitychange', handleVisibility);
+    return () => {
+      window.clearInterval(intervalId);
+      document.removeEventListener('visibilitychange', handleVisibility);
+    };
+  }, [staffUser, loadAdminNotifications]);
+
   // Subscribe to Firestore collections (Google Auth) or poll server API (credentials Auth)
   useEffect(() => {
     if (!staffUser) {
@@ -427,6 +512,8 @@ export const AdminSpace: React.FC<AdminSpaceProps> = ({
 
     if (alerts.length === 0) return;
 
+    void loadAdminNotifications();
+
     if (soundEnabled) {
       const hasUrgent = alerts.some(
         (a) => a.toast.variant === 'error' || a.toast.variant === 'warning'
@@ -449,7 +536,15 @@ export const AdminSpace: React.FC<AdminSpaceProps> = ({
         });
       }
     }
-  }, [orders, payments, staffUser, showToast, soundEnabled, browserNotifEnabled]);
+  }, [
+    orders,
+    payments,
+    staffUser,
+    showToast,
+    soundEnabled,
+    browserNotifEnabled,
+    loadAdminNotifications,
+  ]);
 
   const handleToggleBrowserPopups = async () => {
     const currentPerm = getBrowserNotifPermission();
@@ -487,22 +582,29 @@ export const AdminSpace: React.FC<AdminSpaceProps> = ({
         if (soundEnabled) playNotificationChime('success');
         showToast({
           id: 'atelier_notif_on',
-          title: 'Alertes pop-up activées',
+          title: 'Alertes activées',
           message:
-            'Vous recevrez les notifications même lorsque l’application est en arrière-plan.',
+            'Vous recevrez les notifications et le badge même hors de l’application.',
           variant: 'success',
           durationMs: 5000,
         });
-        void dispatchNativeNotification({
-          title: 'FBC Atelier — Alertes actives',
-          body: 'Les pop-up temps réel pour les commandes et paiements sont activées.',
-          tag: 'fbc-atelier-test',
-          icon: '/atelier-192x192.png',
-          badge: '/atelier-192x192.png',
-          url: '/fbcprintgestionadmin/',
-          swScope: '/fbcprintgestionadmin/',
-        });
+        const subscribed = await subscribeAdminWebPush();
+        if (subscribed) {
+          await sendAdminTestPush().catch(() => {});
+          void loadAdminNotifications();
+        } else {
+          void dispatchNativeNotification({
+            title: 'FBC Atelier — Alertes actives',
+            body: 'Les pop-up temps réel pour les commandes et paiements sont activées.',
+            tag: 'fbc-atelier-test',
+            icon: '/atelier-192x192.png',
+            badge: '/atelier-192x192.png',
+            url: '/fbcprintgestionadmin/',
+            swScope: '/fbcprintgestionadmin/',
+          });
+        }
       } else {
+        await unsubscribeAdminWebPush();
         showToast({
           id: 'atelier_notif_muted',
           title: 'Alertes système en pause',
@@ -522,21 +624,27 @@ export const AdminSpace: React.FC<AdminSpaceProps> = ({
       if (soundEnabled) playNotificationChime('success');
       showToast({
         id: 'atelier_notif_granted',
-        title: 'Alertes pop-up activées !',
+        title: 'Alertes activées !',
         message:
-          'Nouvelles commandes, fichiers corrigés et paiements à vérifier s’afficheront en pop-up.',
+          'Nouvelles commandes, fichiers corrigés et paiements s’afficheront dans vos notifications.',
         variant: 'success',
         durationMs: 6000,
       });
-      void dispatchNativeNotification({
-        title: 'FBC Atelier — Alertes activées',
-        body: 'Vous recevrez désormais les notifications en temps réel.',
-        tag: 'fbc-atelier-welcome',
-        icon: '/atelier-192x192.png',
-        badge: '/atelier-192x192.png',
-        url: '/fbcprintgestionadmin/',
-        swScope: '/fbcprintgestionadmin/',
-      });
+      const subscribed = await subscribeAdminWebPush();
+      if (subscribed) {
+        await sendAdminTestPush().catch(() => {});
+        void loadAdminNotifications();
+      } else {
+        void dispatchNativeNotification({
+          title: 'FBC Atelier — Alertes activées',
+          body: 'Vous recevrez désormais les notifications en temps réel.',
+          tag: 'fbc-atelier-welcome',
+          icon: '/atelier-192x192.png',
+          badge: '/atelier-192x192.png',
+          url: '/fbcprintgestionadmin/',
+          swScope: '/fbcprintgestionadmin/',
+        });
+      }
     } else if (result === 'denied') {
       setBrowserNotifEnabledState(false);
       showToast({
@@ -830,6 +938,12 @@ export const AdminSpace: React.FC<AdminSpaceProps> = ({
       } else {
         const created = await createOrderInFirestore(orderPayload);
         createdOrderNumber = created.orderNumber;
+        if (created.clientAccountId) {
+          void notifyOrderPushServer({
+            orderId: created.orderId,
+            eventType: 'manual_order',
+          });
+        }
       }
       setShowManualModal(false);
       setManualName('');
@@ -995,7 +1109,34 @@ export const AdminSpace: React.FC<AdminSpaceProps> = ({
   }
 
   const isAdmin = staffUser.role === 'admin';
-  const notifCount = metrics.newCount + metrics.pendingPaymentsCount;
+  const pendingActionCount = metrics.newCount + metrics.pendingPaymentsCount;
+  const bellBadgeCount = unreadServerNotifs;
+
+  const handleOpenAdminNotif = (n: ServerNotificationItem) => {
+    setShowNotifications(false);
+    if (!n.read) {
+      setAdminNotifications((prev) =>
+        prev.map((item) => (item.notifId === n.notifId ? { ...item, read: true } : item))
+      );
+      setUnreadServerNotifs((c) => {
+        const next = Math.max(0, c - 1);
+        void syncAppIconBadge(next, '/fbcprintgestionadmin/');
+        return next;
+      });
+      void markAdminNotificationsRead(n.notifId).catch(() => {});
+    }
+    if (n.url?.includes('tab=payments') && isAdmin) {
+      setActiveTab('payments');
+    } else if (n.orderId) {
+      setSelectedOrderId(n.orderId);
+    }
+  };
+
+  const handleMarkAllAdminNotifsRead = async () => {
+    setAdminNotifications((prev) => prev.map((n) => ({ ...n, read: true })));
+    setUnreadServerNotifs(0);
+    await markAdminNotificationsRead().catch(() => {});
+  };
 
   const allTabs: Array<{ id: AdminTab; label: string; adminOnly?: boolean }> = [
     { id: 'dashboard', label: 'Tableau de bord' },
@@ -1079,69 +1220,150 @@ export const AdminSpace: React.FC<AdminSpaceProps> = ({
             )}
           </button>
 
-          {/* Notification Bell */}
-          <button
-            type="button"
-            onClick={() => setShowNotifications((v) => !v)}
-            className="relative p-2.5 rounded-full bg-[#EDF2F4] text-[#26547C] hover:bg-[#119DA4]/15 min-h-[44px] min-w-[44px] flex items-center justify-center"
-            aria-label="Notifications atelier"
-          >
-            <Bell className="w-5 h-5" />
-            {notifCount > 0 && (
-              <span className="absolute -top-1 -right-1 w-5 h-5 rounded-full bg-[#EF233C] text-white text-[11px] font-bold flex items-center justify-center tabular-nums">
-                {notifCount}
-              </span>
-            )}
-          </button>
+          {/* Notification Center Bell */}
+          <div ref={notifBoxRef} className="relative">
+            <button
+              type="button"
+              onClick={() => setShowNotifications((v) => !v)}
+              className="relative p-2.5 rounded-full bg-[#EDF2F4] text-[#26547C] hover:bg-[#119DA4]/15 min-h-[44px] min-w-[44px] flex items-center justify-center"
+              aria-label="Centre de notifications atelier"
+              aria-expanded={showNotifications}
+            >
+              <Bell className="w-5 h-5" />
+              {bellBadgeCount > 0 && (
+                <span className="absolute -top-1 -right-1 min-w-[20px] h-5 px-1 rounded-full bg-[#EF233C] text-white text-[11px] font-bold flex items-center justify-center tabular-nums shadow-sm">
+                  {bellBadgeCount > 99 ? '99+' : bellBadgeCount}
+                </span>
+              )}
+            </button>
 
-          {showNotifications && (
-            <div className="absolute right-0 top-14 z-30 w-80 bg-white rounded-2xl border border-slate-200 shadow-lg p-4 space-y-3">
-              <div className="font-bold text-sm text-[#26547C]">
-                Notifications en attente ({notifCount})
-              </div>
-              <div className="divide-y divide-slate-100 max-h-60 overflow-y-auto text-xs">
-                {orders
-                  .filter((o) => o.status === 'recue')
-                  .slice(0, 5)
-                  .map((o) => (
+            {showNotifications && (
+              <div className="fixed sm:absolute left-3 right-3 sm:left-auto sm:right-0 top-[4.25rem] sm:top-14 z-40 sm:w-96 bg-white rounded-3xl border border-slate-200 shadow-xl overflow-hidden">
+                <div className="px-4 py-3.5 border-b border-slate-100 flex items-center justify-between gap-2 bg-[#EDF2F4]/60">
+                  <div className="flex items-center gap-2">
+                    <span className="font-bold text-sm text-[#26547C]">
+                      Centre de notifications
+                    </span>
+                    {bellBadgeCount > 0 && (
+                      <span className="px-2 py-0.5 rounded-full bg-[#EF233C] text-white text-[10px] font-bold tabular-nums">
+                        {bellBadgeCount}
+                      </span>
+                    )}
+                  </div>
+                  {bellBadgeCount > 0 && (
                     <button
-                      key={o.orderId}
                       type="button"
-                      onClick={() => {
-                        setSelectedOrderId(o.orderId);
-                        setShowNotifications(false);
-                      }}
-                      className="w-full text-left py-2 hover:text-[#119DA4]"
+                      onClick={() => void handleMarkAllAdminNotifsRead()}
+                      className="inline-flex items-center gap-1 text-xs font-semibold text-[#119DA4] hover:underline"
                     >
-                      Nouvelle commande <strong>{o.orderNumber}</strong> · {o.customerName}
-                      {o.urgent && (
-                        <span className="ml-1.5 text-[#EF233C] font-bold">URGENT</span>
-                      )}
+                      <CheckCheck className="w-3.5 h-3.5" />
+                      Tout lire
                     </button>
-                  ))}
-                {isAdmin &&
-                  payments
-                    .filter((p) => p.status === 'en_attente_validation')
-                    .slice(0, 5)
-                    .map((p) => (
-                      <button
-                        key={p.paymentId}
-                        type="button"
-                        onClick={() => {
-                          setActiveTab('payments');
-                          setShowNotifications(false);
-                        }}
-                        className="w-full text-left py-2 hover:text-[#119DA4]"
-                      >
-                        Paiement à valider : <strong>{p.orderNumber}</strong> ({p.methodName})
-                      </button>
-                    ))}
-                {notifCount === 0 && (
-                  <p className="text-slate-500 py-2">Aucune alerte en attente.</p>
-                )}
+                  )}
+                </div>
+
+                <div className="max-h-80 overflow-y-auto divide-y divide-slate-100">
+                  {adminNotifications.length > 0 &&
+                    adminNotifications.map((n) => {
+                      const dotColor =
+                        n.variant === 'error'
+                          ? 'bg-[#EF233C]'
+                          : n.variant === 'warning'
+                            ? 'bg-amber-500'
+                            : n.variant === 'success'
+                              ? 'bg-[#2E9E6B]'
+                              : 'bg-[#119DA4]';
+                      return (
+                        <button
+                          key={n.notifId}
+                          type="button"
+                          onClick={() => handleOpenAdminNotif(n)}
+                          className={`w-full text-left px-4 py-3 flex items-start gap-2.5 transition-colors hover:bg-[#EDF2F4]/70 ${
+                            !n.read ? 'bg-[#119DA4]/[0.05]' : ''
+                          }`}
+                        >
+                          <span
+                            className={`mt-1.5 w-2 h-2 rounded-full shrink-0 ${
+                              !n.read ? dotColor : 'bg-slate-300'
+                            }`}
+                          />
+                          <div className="min-w-0 flex-1 space-y-0.5">
+                            <div className="flex items-center justify-between gap-2">
+                              <span
+                                className={`text-xs font-bold truncate ${
+                                  !n.read ? 'text-[#26547C]' : 'text-slate-700'
+                                }`}
+                              >
+                                {n.title}
+                              </span>
+                              <span className="text-[10px] text-slate-400 tabular-nums shrink-0">
+                                {new Date(n.createdAt).toLocaleTimeString('fr-FR', {
+                                  hour: '2-digit',
+                                  minute: '2-digit',
+                                })}
+                              </span>
+                            </div>
+                            <p className="text-xs text-slate-600 line-clamp-2">
+                              {n.body}
+                            </p>
+                          </div>
+                        </button>
+                      );
+                    })}
+
+                  {pendingActionCount > 0 && (
+                    <div className="px-4 py-2.5 bg-slate-50/80 space-y-1.5">
+                      <div className="text-[11px] font-bold uppercase tracking-wide text-slate-500">
+                        Actions atelier en cours ({pendingActionCount})
+                      </div>
+                      {orders
+                        .filter((o) => o.status === 'recue')
+                        .slice(0, 4)
+                        .map((o) => (
+                          <button
+                            key={o.orderId}
+                            type="button"
+                            onClick={() => {
+                              setSelectedOrderId(o.orderId);
+                              setShowNotifications(false);
+                            }}
+                            className="w-full text-left py-1 text-xs text-[#26547C] hover:text-[#119DA4] block"
+                          >
+                            Commande reçue <strong>{o.orderNumber}</strong> · {o.customerName}
+                            {o.urgent && (
+                              <span className="ml-1.5 text-[#EF233C] font-bold">URGENT</span>
+                            )}
+                          </button>
+                        ))}
+                      {isAdmin &&
+                        payments
+                          .filter((p) => p.status === 'en_attente_validation')
+                          .slice(0, 4)
+                          .map((p) => (
+                            <button
+                              key={p.paymentId}
+                              type="button"
+                              onClick={() => {
+                                setActiveTab('payments');
+                                setShowNotifications(false);
+                              }}
+                              className="w-full text-left py-1 text-xs text-[#26547C] hover:text-[#119DA4] block"
+                            >
+                              Paiement à valider : <strong>{p.orderNumber}</strong> ({p.methodName})
+                            </button>
+                          ))}
+                    </div>
+                  )}
+
+                  {adminNotifications.length === 0 && pendingActionCount === 0 && (
+                    <p className="text-xs text-slate-500 py-8 px-4 text-center">
+                      Aucune alerte reçue pour le moment.
+                    </p>
+                  )}
+                </div>
               </div>
-            </div>
-          )}
+            )}
+          </div>
 
           <button
             type="button"
@@ -1724,6 +1946,12 @@ export const AdminSpace: React.FC<AdminSpaceProps> = ({
                                     actorEmail: staffUser.email,
                                     actorRole: staffUser.role,
                                   });
+                                  void notifyOrderPushServer({
+                                    orderId: linkedOrder.orderId,
+                                    eventType: 'payment_validated',
+                                    amount: pay.declaredAmount,
+                                    methodName: pay.methodName,
+                                  });
                                 }
                                 showToast({
                                   id: `payment_validated_${pay.paymentId}`,
@@ -2109,6 +2337,11 @@ export const AdminSpace: React.FC<AdminSpaceProps> = ({
                           reason: rejectReason.trim(),
                           actorEmail: staffUser.email,
                           actorRole: staffUser.role,
+                        });
+                        void notifyOrderPushServer({
+                          orderId: linked.orderId,
+                          eventType: 'payment_rejected',
+                          reason: rejectReason.trim(),
                         });
                       }
                       showToast({

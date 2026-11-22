@@ -27,7 +27,12 @@ import {
   setBrowserNotifEnabled,
   type BrowserNotifPermission,
 } from '../lib/browserNotifications';
-import { reuploadClientCorrectedFile } from '../lib/clientApi';
+import {
+  reuploadClientCorrectedFile,
+  sendClientTestPush,
+  subscribeClientWebPush,
+  unsubscribeClientWebPush,
+} from '../lib/clientApi';
 import { generateQuotePdf, generateReceiptPdf } from '../lib/pdfGenerator';
 import {
   formatBytes,
@@ -60,6 +65,7 @@ interface OrderTrackingViewProps {
   onOpenCode: (trackingCode: string) => Promise<string | null>;
   onOrderUpdated: (order: Order) => void;
   onBackToOrders: () => void;
+  onNotificationsChanged?: () => void;
 }
 
 const TIMELINE_STEPS = [
@@ -81,6 +87,7 @@ export const OrderTrackingView: React.FC<OrderTrackingViewProps> = ({
   onOpenCode,
   onOrderUpdated,
   onBackToOrders,
+  onNotificationsChanged,
 }) => {
   const { showToast } = useToast();
   const [trackingCode, setTrackingCode] = useState(initialTrackingCode);
@@ -296,22 +303,29 @@ export const OrderTrackingView: React.FC<OrderTrackingViewProps> = ({
         showToast({
           id: 'client_notif_enabled',
           badge: order.orderNumber,
-          title: 'Alertes pop-up activées',
+          title: 'Alertes activées',
           message:
-            'Vous serez alerté dès que le statut de votre commande évolue.',
+            'Vous serez alerté dans votre appareil même hors de l’application.',
           variant: 'success',
           durationMs: 5000,
         });
-        void dispatchNativeNotification({
-          title: `Suivi ${order.orderNumber} activé`,
-          body: 'Vous recevrez une notification à chaque étape (paiement, production, retrait).',
-          tag: `fbc-client-welcome-${order.orderId}`,
-          icon: '/pwa-192x192.png',
-          badge: '/pwa-192x192.png',
-          url: `/client/?code=${encodeURIComponent(order.trackingCode)}`,
-          swScope: '/client/',
-        });
+        const subscribed = await subscribeClientWebPush();
+        if (subscribed) {
+          await sendClientTestPush().catch(() => {});
+          onNotificationsChanged?.();
+        } else {
+          void dispatchNativeNotification({
+            title: `Suivi ${order.orderNumber} activé`,
+            body: 'Vous recevrez une notification à chaque étape (paiement, production, retrait).',
+            tag: `fbc-client-welcome-${order.orderId}`,
+            icon: '/pwa-192x192.png',
+            badge: '/pwa-192x192.png',
+            url: `/client/?code=${encodeURIComponent(order.trackingCode)}`,
+            swScope: '/client/',
+          });
+        }
       } else {
+        await unsubscribeClientWebPush();
         showToast({
           id: 'client_notif_paused',
           title: 'Alertes système en pause',
@@ -331,21 +345,27 @@ export const OrderTrackingView: React.FC<OrderTrackingViewProps> = ({
       showToast({
         id: 'client_notif_granted',
         badge: order.orderNumber,
-        title: 'Alertes pop-up activées !',
+        title: 'Alertes activées !',
         message:
-          'Vous serez notifié en temps réel pour votre paiement, la mise en production et le retrait.',
+          'Vous serez notifié même en dehors de l’application (paiement, production, retrait).',
         variant: 'success',
         durationMs: 6000,
       });
-      void dispatchNativeNotification({
-        title: `Suivi ${order.orderNumber} activé`,
-        body: 'Les alertes pop-up sont prêtes pour votre commande FBC Print.',
-        tag: `fbc-client-welcome-${order.orderId}`,
-        icon: '/pwa-192x192.png',
-        badge: '/pwa-192x192.png',
-        url: `/client/?code=${encodeURIComponent(order.trackingCode)}`,
-        swScope: '/client/',
-      });
+      const subscribed = await subscribeClientWebPush();
+      if (subscribed) {
+        await sendClientTestPush().catch(() => {});
+        onNotificationsChanged?.();
+      } else {
+        void dispatchNativeNotification({
+          title: `Suivi ${order.orderNumber} activé`,
+          body: 'Les alertes pop-up sont prêtes pour votre commande FBC Print.',
+          tag: `fbc-client-welcome-${order.orderId}`,
+          icon: '/pwa-192x192.png',
+          badge: '/pwa-192x192.png',
+          url: `/client/?code=${encodeURIComponent(order.trackingCode)}`,
+          swScope: '/client/',
+        });
+      }
     } else if (result === 'denied') {
       setBrowserNotifEnabledState(false);
       showToast({

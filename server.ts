@@ -10,6 +10,7 @@ import { createServer as createViteServer } from 'vite';
 import { cert, getApps, initializeApp } from 'firebase-admin/app';
 import { getAuth } from 'firebase-admin/auth';
 import { FieldValue, initializeFirestore, Timestamp } from 'firebase-admin/firestore';
+import * as webpush from 'web-push';
 
 const require = createRequire(import.meta.url);
 const { ZipArchive } = require('archiver') as {
@@ -79,6 +80,307 @@ function getSessionSecret(): string {
 }
 
 const SESSION_SECRET = getSessionSecret();
+
+interface VapidKeysPair {
+  publicKey: string;
+  privateKey: string;
+}
+
+let cachedVapidKeys: VapidKeysPair | null = null;
+let vapidInitPromise: Promise<VapidKeysPair> | null = null;
+
+async function ensureVapidKeys(): Promise<VapidKeysPair> {
+  if (cachedVapidKeys) return cachedVapidKeys;
+  if (vapidInitPromise) return vapidInitPromise;
+
+  vapidInitPromise = (async () => {
+    const envPub = process.env.VAPID_PUBLIC_KEY?.trim();
+    const envPriv = process.env.VAPID_PRIVATE_KEY?.trim();
+    if (envPub && envPriv) {
+      cachedVapidKeys = { publicKey: envPub, privateKey: envPriv };
+      webpush.setVapidDetails('mailto:contact@fbcprint.bf', envPub, envPriv);
+      return cachedVapidKeys;
+    }
+
+    try {
+      const secretRef = adminDb.collection('server_secrets').doc('vapid_keys');
+      const snap = await secretRef.get();
+      if (snap.exists) {
+        const data = snap.data() as { publicKey?: string; privateKey?: string };
+        if (data.publicKey && data.privateKey) {
+          cachedVapidKeys = { publicKey: data.publicKey, privateKey: data.privateKey };
+          webpush.setVapidDetails('mailto:contact@fbcprint.bf', data.publicKey, data.privateKey);
+          return cachedVapidKeys;
+        }
+      }
+
+      const generated = webpush.generateVAPIDKeys();
+      await secretRef.set({
+        publicKey: generated.publicKey,
+        privateKey: generated.privateKey,
+        createdAt: new Date().toISOString(),
+      });
+      cachedVapidKeys = { publicKey: generated.publicKey, privateKey: generated.privateKey };
+      webpush.setVapidDetails('mailto:contact@fbcprint.bf', generated.publicKey, generated.privateKey);
+      return cachedVapidKeys;
+    } catch (err) {
+      console.warn('Firestore VAPID store unavailable, using runtime keys:', err);
+      const fallback = webpush.generateVAPIDKeys();
+      cachedVapidKeys = fallback;
+      webpush.setVapidDetails('mailto:contact@fbcprint.bf', fallback.publicKey, fallback.privateKey);
+      return fallback;
+    }
+  })();
+
+  try {
+    return await vapidInitPromise;
+  } finally {
+    vapidInitPromise = null;
+  }
+}
+
+interface PushSubscriptionDoc {
+  subId: string;
+  audience: 'client' | 'atelier';
+  clientAccountId?: string;
+  staffUid?: string;
+  staffRole?: 'admin' | 'operator';
+  endpoint: string;
+  p256dh: string;
+  auth: string;
+  unreadCount: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+function buildSubscriptionId(audience: 'client' | 'atelier', ownerKey: string, endpoint: string): string {
+  return crypto
+    .createHash('sha256')
+    .update(`${audience}|${ownerKey}|${endpoint}`)
+    .digest('hex')
+    .slice(0, 32);
+}
+
+function isValidPushPayload(body: unknown): body is {
+  endpoint: string;
+  keys: { p256dh: string; auth: string };
+} {
+  if (!body || typeof body !== 'object') return false;
+  const sub = body as { endpoint?: unknown; keys?: { p256dh?: unknown; auth?: unknown } };
+  if (typeof sub.endpoint !== 'string' || sub.endpoint.length < 10 || sub.endpoint.length > 1000) {
+    return false;
+  }
+  try {
+    const parsed = new URL(sub.endpoint);
+    if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') return false;
+  } catch {
+    return false;
+  }
+  return (
+    Boolean(sub.keys) &&
+    typeof sub.keys?.p256dh === 'string' &&
+    sub.keys.p256dh.length >= 16 &&
+    sub.keys.p256dh.length <= 256 &&
+    typeof sub.keys?.auth === 'string' &&
+    sub.keys.auth.length >= 8 &&
+    sub.keys.auth.length <= 128
+  );
+}
+
+function buildClientStatusCopy(params: {
+  orderNumber: string;
+  newStatus: string;
+  statusLabel?: string;
+  note?: string;
+  correctionMessage?: string;
+  cancellationReason?: string;
+}): { title: string; body: string; variant: 'info' | 'success' | 'warning' | 'error'; requireInteraction: boolean } {
+  switch (params.newStatus) {
+    case 'en_verification':
+      return {
+        title: `Fichiers en vérification · ${params.orderNumber}`,
+        body: 'Notre équipe contrôle la qualité de vos fichiers avant impression.',
+        variant: 'info',
+        requireInteraction: false,
+      };
+    case 'fichier_a_corriger':
+      return {
+        title: `Fichier à corriger · ${params.orderNumber}`,
+        body: params.correctionMessage || 'Une nouvelle version de votre fichier est demandée par l’atelier.',
+        variant: 'error',
+        requireInteraction: true,
+      };
+    case 'en_attente_paiement':
+      return {
+        title: `Devis prêt · ${params.orderNumber}`,
+        body: 'Votre dossier est prêt pour le règlement Mobile Money.',
+        variant: 'warning',
+        requireInteraction: false,
+      };
+    case 'payee':
+      return {
+        title: `Commande payée · ${params.orderNumber}`,
+        body: 'Votre règlement a été confirmé. Mise en production imminente.',
+        variant: 'success',
+        requireInteraction: false,
+      };
+    case 'en_production':
+      return {
+        title: `Impression lancée · ${params.orderNumber}`,
+        body: 'Votre commande est en cours de fabrication dans notre atelier.',
+        variant: 'info',
+        requireInteraction: false,
+      };
+    case 'prete':
+      return {
+        title: `Commande prête ! · ${params.orderNumber}`,
+        body: 'Votre commande est prête pour le retrait en agence ou la livraison.',
+        variant: 'success',
+        requireInteraction: true,
+      };
+    case 'livree':
+      return {
+        title: `Commande livrée · ${params.orderNumber}`,
+        body: 'Merci pour votre confiance envers FBC Print.',
+        variant: 'success',
+        requireInteraction: false,
+      };
+    case 'annulee':
+      return {
+        title: `Commande annulée · ${params.orderNumber}`,
+        body: params.cancellationReason ? `Motif : ${params.cancellationReason}` : 'Cette commande a été annulée.',
+        variant: 'error',
+        requireInteraction: false,
+      };
+    default:
+      return {
+        title: `${params.statusLabel || params.newStatus} · ${params.orderNumber}`,
+        body: params.note || 'Le suivi de votre commande a été mis à jour.',
+        variant: 'info',
+        requireInteraction: false,
+      };
+  }
+}
+
+async function recordAndDispatchPush(params: {
+  audience: 'client' | 'atelier';
+  clientAccountId?: string;
+  minRole?: 'admin' | 'operator';
+  orderId?: string;
+  orderNumber?: string;
+  trackingCode?: string;
+  title: string;
+  body: string;
+  variant: 'info' | 'success' | 'warning' | 'error';
+  url: string;
+  requireInteraction?: boolean;
+}): Promise<{ delivered: number; notifId: string }> {
+  const notifId = `ntf_${Date.now()}_${randomIdToken(8)}`;
+  const nowIso = new Date().toISOString();
+
+  try {
+    await adminDb
+      .collection('notifications')
+      .doc(notifId)
+      .set(
+        sanitizeServerFirestore({
+          notifId,
+          audience: params.audience,
+          ...(params.clientAccountId ? { clientAccountId: params.clientAccountId } : {}),
+          ...(params.minRole ? { minRole: params.minRole } : {}),
+          ...(params.orderId ? { orderId: params.orderId } : {}),
+          ...(params.orderNumber ? { orderNumber: params.orderNumber } : {}),
+          ...(params.trackingCode ? { trackingCode: params.trackingCode } : {}),
+          title: params.title.slice(0, 160),
+          body: params.body.slice(0, 500),
+          variant: params.variant,
+          url: params.url.slice(0, 300),
+          read: false,
+          createdAt: nowIso,
+          createdAtMs: Date.now(),
+        })
+      );
+  } catch (err) {
+    console.warn('Notification persistence warning:', err);
+  }
+
+  let delivered = 0;
+  try {
+    await ensureVapidKeys();
+    const subsQuery =
+      params.audience === 'client'
+        ? params.clientAccountId
+          ? adminDb
+              .collection('push_subscriptions')
+              .where('audience', '==', 'client')
+              .where('clientAccountId', '==', params.clientAccountId)
+          : null
+        : adminDb.collection('push_subscriptions').where('audience', '==', 'atelier');
+
+    if (!subsQuery) return { delivered: 0, notifId };
+    const snap = await subsQuery.get();
+    if (snap.empty) return { delivered: 0, notifId };
+
+    const icon =
+      params.audience === 'atelier' ? '/atelier-192x192.png' : '/pwa-192x192.png';
+
+    await Promise.all(
+      snap.docs.map(async (docSnap) => {
+        const sub = docSnap.data() as PushSubscriptionDoc;
+        if (
+          params.audience === 'atelier' &&
+          params.minRole === 'admin' &&
+          sub.staffRole !== 'admin'
+        ) {
+          return;
+        }
+        const nextUnread = (sub.unreadCount || 0) + 1;
+        await docSnap.ref
+          .update({ unreadCount: nextUnread, updatedAt: nowIso })
+          .catch(() => {});
+
+        const pushPayload = JSON.stringify({
+          notifId,
+          title: params.title,
+          body: params.body,
+          tag: notifId,
+          icon,
+          badge: icon,
+          url: params.url,
+          unreadCount: nextUnread,
+          requireInteraction: Boolean(params.requireInteraction),
+          timestamp: Date.now(),
+        });
+
+        try {
+          await webpush.sendNotification(
+            {
+              endpoint: sub.endpoint,
+              keys: { p256dh: sub.p256dh, auth: sub.auth },
+            },
+            pushPayload,
+            { TTL: 24 * 60 * 60 }
+          );
+          delivered += 1;
+        } catch (err: unknown) {
+          const statusCode =
+            err && typeof err === 'object' && 'statusCode' in err
+              ? Number((err as { statusCode?: unknown }).statusCode)
+              : 0;
+          if (statusCode === 404 || statusCode === 410) {
+            await docSnap.ref.delete().catch(() => {});
+          } else {
+            console.warn('Web push delivery warning:', statusCode || err);
+          }
+        }
+      })
+    );
+  } catch (err) {
+    console.warn('Web push dispatch skipped:', err);
+  }
+
+  return { delivered, notifId };
+}
 
 interface StaffSessionPayload {
   type?: 'staff';
@@ -1735,6 +2037,20 @@ async function startServer() {
         details: `Client : ${String(payload.customerName || '')}`,
       });
 
+      if (matchedClientAccountId) {
+        void recordAndDispatchPush({
+          audience: 'client',
+          clientAccountId: matchedClientAccountId,
+          orderId,
+          orderNumber,
+          trackingCode,
+          title: `Nouvelle commande ${orderNumber}`,
+          body: `Votre dossier (${trackingCode}) a été enregistré à l’atelier FBC Print.`,
+          variant: 'info',
+          url: `/client/?code=${encodeURIComponent(trackingCode)}`,
+        });
+      }
+
       res.status(201).json({
         orderId,
         orderNumber,
@@ -1777,6 +2093,8 @@ async function startServer() {
       }
       const orderData = snap.data() as {
         orderNumber: string;
+        trackingCode?: string;
+        clientAccountId?: string;
         statusHistory?: Array<Record<string, unknown>>;
       };
 
@@ -1809,6 +2127,31 @@ async function startServer() {
         actorRole: caller.actorRole,
         details: note || correctionMessage || cancellationReason || '',
       });
+
+      if (orderData.clientAccountId) {
+        const copy = buildClientStatusCopy({
+          orderNumber: orderData.orderNumber,
+          newStatus,
+          statusLabel,
+          note,
+          correctionMessage,
+          cancellationReason,
+        });
+        void recordAndDispatchPush({
+          audience: 'client',
+          clientAccountId: orderData.clientAccountId,
+          orderId,
+          orderNumber: orderData.orderNumber,
+          trackingCode: orderData.trackingCode,
+          title: copy.title,
+          body: copy.body,
+          variant: copy.variant,
+          url: orderData.trackingCode
+            ? `/client/?code=${encodeURIComponent(orderData.trackingCode)}`
+            : '/client/',
+          requireInteraction: copy.requireInteraction,
+        });
+      }
 
       res.json({ ok: true });
     } catch (err) {
@@ -1885,6 +2228,8 @@ async function startServer() {
       const order = orderSnap.data() as {
         orderId: string;
         orderNumber: string;
+        trackingCode?: string;
+        clientAccountId?: string;
         customerName: string;
         customerPhone: string;
         isWhatsapp?: boolean;
@@ -2002,6 +2347,22 @@ async function startServer() {
         details: `${order.orderNumber} · ${payment.declaredAmount} FCFA (${payment.methodName})`,
       });
 
+      if (order.clientAccountId) {
+        void recordAndDispatchPush({
+          audience: 'client',
+          clientAccountId: order.clientAccountId,
+          orderId: order.orderId,
+          orderNumber: order.orderNumber,
+          trackingCode: order.trackingCode,
+          title: `Paiement confirmé · ${order.orderNumber}`,
+          body: `${payment.declaredAmount.toLocaleString('fr-FR')} FCFA validés (${payment.methodName}). Reçu ${receiptNumber} disponible.`,
+          variant: 'success',
+          url: order.trackingCode
+            ? `/client/?code=${encodeURIComponent(order.trackingCode)}`
+            : '/client/',
+        });
+      }
+
       res.json({ ok: true, receiptNumber });
     } catch (err) {
       handleServerApiError(res, err, 'Impossible de valider ce paiement.');
@@ -2047,7 +2408,10 @@ async function startServer() {
         return;
       }
       const order = orderSnap.data() as {
+        orderId: string;
         orderNumber: string;
+        trackingCode?: string;
+        clientAccountId?: string;
         status: string;
         statusHistory?: Array<Record<string, unknown>>;
       };
@@ -2098,6 +2462,23 @@ async function startServer() {
         actorRole: 'admin',
         details: `${order.orderNumber} · Motif : ${reason.trim()}`,
       });
+
+      if (order.clientAccountId) {
+        void recordAndDispatchPush({
+          audience: 'client',
+          clientAccountId: order.clientAccountId,
+          orderId: order.orderId,
+          orderNumber: order.orderNumber,
+          trackingCode: order.trackingCode,
+          title: `Justificatif de paiement rejeté · ${order.orderNumber}`,
+          body: `Motif : ${reason.trim()}`,
+          variant: 'error',
+          url: order.trackingCode
+            ? `/client/?code=${encodeURIComponent(order.trackingCode)}`
+            : '/client/',
+          requireInteraction: true,
+        });
+      }
 
       res.json({ ok: true });
     } catch (err) {
@@ -2816,6 +3197,22 @@ async function startServer() {
 
       bindOrderFilesToClient(filesList, caller.accountId);
 
+      const totalRounded = Math.round(Number(payload.totalAmount || 0));
+      void recordAndDispatchPush({
+        audience: 'atelier',
+        minRole: 'operator',
+        orderId,
+        orderNumber,
+        trackingCode,
+        title: payload.urgent
+          ? `Commande URGENTE · ${orderNumber}`
+          : `Nouvelle commande · ${orderNumber}`,
+        body: `${customerName} · ${totalRounded.toLocaleString('fr-FR')} FCFA`,
+        variant: payload.urgent ? 'error' : 'info',
+        url: `/fbcprintgestionadmin/?order=${encodeURIComponent(orderId)}`,
+        requireInteraction: Boolean(payload.urgent),
+      });
+
       res.status(201).json({
         order: serializeFirestoreValue({
           ...orderDoc,
@@ -2950,6 +3347,20 @@ async function startServer() {
       );
 
       const updatedOrderSnap = await orderRef.get();
+
+      void recordAndDispatchPush({
+        audience: 'atelier',
+        minRole: 'admin',
+        orderId: String(orderData.orderId),
+        orderNumber: String(orderData.orderNumber),
+        trackingCode: typeof orderData.trackingCode === 'string' ? orderData.trackingCode : undefined,
+        title: `Paiement à vérifier · ${String(orderData.orderNumber)}`,
+        body: `${String(orderData.customerName)} · ${declaredAmount.toLocaleString('fr-FR')} FCFA (${methodName})`,
+        variant: 'warning',
+        url: '/fbcprintgestionadmin/?tab=payments',
+        requireInteraction: true,
+      });
+
       res.status(201).json({
         payment: serializeFirestoreValue({ ...paymentDoc, createdAt: nowIso }),
         order: serializeFirestoreValue(updatedOrderSnap.data()),
@@ -3032,6 +3443,19 @@ async function startServer() {
       );
 
       const updatedSnap = await orderRef.get();
+
+      void recordAndDispatchPush({
+        audience: 'atelier',
+        minRole: 'operator',
+        orderId: String(orderData.orderId || req.params.orderId),
+        orderNumber: String(orderData.orderNumber || ''),
+        trackingCode: typeof orderData.trackingCode === 'string' ? orderData.trackingCode : undefined,
+        title: `Fichier corrigé reçu · ${String(orderData.orderNumber || '')}`,
+        body: `${String(orderData.customerName || caller.fullName)} a transmis ${String(newFile.originalName || 'un nouveau fichier')}.`,
+        variant: 'info',
+        url: `/fbcprintgestionadmin/?order=${encodeURIComponent(req.params.orderId)}`,
+      });
+
       res.json({ order: serializeFirestoreValue(updatedSnap.data()) });
     } catch (err) {
       handleServerApiError(res, err, 'Impossible de transmettre le fichier corrigé.');
@@ -3180,6 +3604,484 @@ async function startServer() {
       requiresAuth: true,
       error: 'Par sécurité, veuillez vous connecter à votre compte client (téléphone ou nom d’utilisateur et mot de passe) pour consulter vos commandes.',
     });
+  });
+
+  // --- Web Push (VAPID) & Persistent Notification Center API ---
+
+  app.get('/api/push/vapid-public-key', async (_req, res) => {
+    try {
+      const keys = await ensureVapidKeys();
+      res.json({ publicKey: keys.publicKey });
+    } catch (err) {
+      handleServerApiError(res, err, 'Clé de notification indisponible.');
+    }
+  });
+
+  // Client: register / refresh Web Push subscription
+  app.post('/api/client/push/subscribe', async (req, res) => {
+    try {
+      const caller = await resolveServerClientCaller(req);
+      if (!caller) {
+        res.status(401).json({ error: 'Connexion client requise.' });
+        return;
+      }
+      if (!isValidPushPayload(req.body)) {
+        res.status(400).json({ error: 'Abonnement push invalide.' });
+        return;
+      }
+      const { endpoint, keys } = req.body;
+      const subId = buildSubscriptionId('client', caller.accountId, endpoint);
+      const nowIso = new Date().toISOString();
+      const subRef = adminDb.collection('push_subscriptions').doc(subId);
+      const existing = await subRef.get();
+      const prevUnread = existing.exists
+        ? Number((existing.data() as { unreadCount?: number }).unreadCount || 0)
+        : 0;
+
+      await subRef.set(
+        sanitizeServerFirestore({
+          subId,
+          audience: 'client',
+          clientAccountId: caller.accountId,
+          endpoint,
+          p256dh: keys.p256dh,
+          auth: keys.auth,
+          unreadCount: prevUnread,
+          createdAt: existing.exists
+            ? String((existing.data() as { createdAt?: string }).createdAt || nowIso)
+            : nowIso,
+          updatedAt: nowIso,
+        })
+      );
+
+      res.json({ ok: true, subId });
+    } catch (err) {
+      handleServerApiError(res, err, 'Impossible d’enregistrer l’abonnement push.');
+    }
+  });
+
+  app.post('/api/client/push/unsubscribe', async (req, res) => {
+    try {
+      const caller = await resolveServerClientCaller(req);
+      if (!caller) {
+        res.status(401).json({ error: 'Connexion client requise.' });
+        return;
+      }
+      const { endpoint } = (req.body || {}) as { endpoint?: string };
+      if (typeof endpoint === 'string' && endpoint.trim()) {
+        const subId = buildSubscriptionId('client', caller.accountId, endpoint.trim());
+        await adminDb.collection('push_subscriptions').doc(subId).delete().catch(() => {});
+      }
+      res.json({ ok: true });
+    } catch (err) {
+      handleServerApiError(res, err, 'Impossible de désactiver l’abonnement push.');
+    }
+  });
+
+  app.post('/api/client/push/badge-reset', async (req, res) => {
+    try {
+      const caller = await resolveServerClientCaller(req);
+      if (!caller) {
+        res.status(401).json({ error: 'Connexion client requise.' });
+        return;
+      }
+      const snap = await adminDb
+        .collection('push_subscriptions')
+        .where('audience', '==', 'client')
+        .where('clientAccountId', '==', caller.accountId)
+        .get();
+      const nowIso = new Date().toISOString();
+      await Promise.all(
+        snap.docs.map((d) =>
+          d.ref.update({ unreadCount: 0, updatedAt: nowIso }).catch(() => {})
+        )
+      );
+      res.json({ ok: true });
+    } catch (err) {
+      handleServerApiError(res, err, 'Impossible de réinitialiser le badge.');
+    }
+  });
+
+  app.post('/api/client/push/test', async (req, res) => {
+    try {
+      const caller = await resolveServerClientCaller(req);
+      if (!caller) {
+        res.status(401).json({ error: 'Connexion client requise.' });
+        return;
+      }
+      const result = await recordAndDispatchPush({
+        audience: 'client',
+        clientAccountId: caller.accountId,
+        title: 'FBC Print — Alertes actives',
+        body: `Bonjour ${caller.fullName}, vous recevrez désormais vos suivis même hors de l’application.`,
+        variant: 'success',
+        url: '/client/',
+      });
+      res.json({ ok: true, delivered: result.delivered, notifId: result.notifId });
+    } catch (err) {
+      handleServerApiError(res, err, 'Impossible d’envoyer la notification test.');
+    }
+  });
+
+  app.get('/api/client/notifications', async (req, res) => {
+    try {
+      const caller = await resolveServerClientCaller(req);
+      if (!caller) {
+        res.status(401).json({ error: 'Connexion client requise.' });
+        return;
+      }
+      const snap = await adminDb
+        .collection('notifications')
+        .where('audience', '==', 'client')
+        .where('clientAccountId', '==', caller.accountId)
+        .get();
+
+      const notifications = snap.docs
+        .map((d) => serializeFirestoreValue(d.data()) as Record<string, unknown>)
+        .sort((a, b) => Number(b.createdAtMs || 0) - Number(a.createdAtMs || 0))
+        .slice(0, 35);
+
+      const unreadCount = notifications.filter((n) => n.read === false).length;
+      res.json({ notifications, unreadCount });
+    } catch (err) {
+      handleServerApiError(res, err, 'Impossible de charger le centre de notifications.');
+    }
+  });
+
+  app.post('/api/client/notifications/mark-read', async (req, res) => {
+    try {
+      const caller = await resolveServerClientCaller(req);
+      if (!caller) {
+        res.status(401).json({ error: 'Connexion client requise.' });
+        return;
+      }
+      const { notifId } = (req.body || {}) as { notifId?: string };
+
+      if (typeof notifId === 'string' && notifId.trim()) {
+        const docRef = adminDb.collection('notifications').doc(notifId.trim());
+        const snap = await docRef.get();
+        if (snap.exists && (snap.data() as { clientAccountId?: string }).clientAccountId === caller.accountId) {
+          await docRef.update({ read: true }).catch(() => {});
+        }
+      } else {
+        const snap = await adminDb
+          .collection('notifications')
+          .where('audience', '==', 'client')
+          .where('clientAccountId', '==', caller.accountId)
+          .where('read', '==', false)
+          .get();
+        await Promise.all(snap.docs.map((d) => d.ref.update({ read: true }).catch(() => {})));
+
+        const subsSnap = await adminDb
+          .collection('push_subscriptions')
+          .where('audience', '==', 'client')
+          .where('clientAccountId', '==', caller.accountId)
+          .get();
+        const nowIso = new Date().toISOString();
+        await Promise.all(
+          subsSnap.docs.map((d) =>
+            d.ref.update({ unreadCount: 0, updatedAt: nowIso }).catch(() => {})
+          )
+        );
+      }
+
+      res.json({ ok: true });
+    } catch (err) {
+      handleServerApiError(res, err, 'Impossible de marquer les notifications comme lues.');
+    }
+  });
+
+  // Staff / Atelier: register / refresh Web Push subscription
+  app.post('/api/admin/push/subscribe', async (req, res) => {
+    try {
+      const caller = await resolveServerStaffCaller(req);
+      if (!caller) {
+        res.status(401).json({ error: 'Authentification atelier requise.' });
+        return;
+      }
+      if (!isValidPushPayload(req.body)) {
+        res.status(400).json({ error: 'Abonnement push invalide.' });
+        return;
+      }
+      const { endpoint, keys } = req.body;
+      const subId = buildSubscriptionId('atelier', caller.uid, endpoint);
+      const nowIso = new Date().toISOString();
+      const subRef = adminDb.collection('push_subscriptions').doc(subId);
+      const existing = await subRef.get();
+      const prevUnread = existing.exists
+        ? Number((existing.data() as { unreadCount?: number }).unreadCount || 0)
+        : 0;
+
+      await subRef.set(
+        sanitizeServerFirestore({
+          subId,
+          audience: 'atelier',
+          staffUid: caller.uid,
+          staffRole: caller.actorRole,
+          endpoint,
+          p256dh: keys.p256dh,
+          auth: keys.auth,
+          unreadCount: prevUnread,
+          createdAt: existing.exists
+            ? String((existing.data() as { createdAt?: string }).createdAt || nowIso)
+            : nowIso,
+          updatedAt: nowIso,
+        })
+      );
+
+      res.json({ ok: true, subId });
+    } catch (err) {
+      handleServerApiError(res, err, 'Impossible d’enregistrer l’abonnement atelier.');
+    }
+  });
+
+  app.post('/api/admin/push/unsubscribe', async (req, res) => {
+    try {
+      const caller = await resolveServerStaffCaller(req);
+      if (!caller) {
+        res.status(401).json({ error: 'Authentification atelier requise.' });
+        return;
+      }
+      const { endpoint } = (req.body || {}) as { endpoint?: string };
+      if (typeof endpoint === 'string' && endpoint.trim()) {
+        const subId = buildSubscriptionId('atelier', caller.uid, endpoint.trim());
+        await adminDb.collection('push_subscriptions').doc(subId).delete().catch(() => {});
+      }
+      res.json({ ok: true });
+    } catch (err) {
+      handleServerApiError(res, err, 'Impossible de désactiver l’abonnement atelier.');
+    }
+  });
+
+  app.post('/api/admin/push/badge-reset', async (req, res) => {
+    try {
+      const caller = await resolveServerStaffCaller(req);
+      if (!caller) {
+        res.status(401).json({ error: 'Authentification atelier requise.' });
+        return;
+      }
+      const snap = await adminDb
+        .collection('push_subscriptions')
+        .where('audience', '==', 'atelier')
+        .where('staffUid', '==', caller.uid)
+        .get();
+      const nowIso = new Date().toISOString();
+      await Promise.all(
+        snap.docs.map((d) =>
+          d.ref.update({ unreadCount: 0, updatedAt: nowIso }).catch(() => {})
+        )
+      );
+      res.json({ ok: true });
+    } catch (err) {
+      handleServerApiError(res, err, 'Impossible de réinitialiser le badge atelier.');
+    }
+  });
+
+  app.post('/api/admin/push/test', async (req, res) => {
+    try {
+      const caller = await resolveServerStaffCaller(req);
+      if (!caller) {
+        res.status(401).json({ error: 'Authentification atelier requise.' });
+        return;
+      }
+      const result = await recordAndDispatchPush({
+        audience: 'atelier',
+        minRole: caller.actorRole,
+        title: 'FBC Atelier — Alertes actives',
+        body: 'Les notifications temps réel (commandes, paiements, fichiers) sont prêtes, même hors ligne de la page.',
+        variant: 'success',
+        url: '/fbcprintgestionadmin/',
+      });
+      res.json({ ok: true, delivered: result.delivered, notifId: result.notifId });
+    } catch (err) {
+      handleServerApiError(res, err, 'Impossible d’envoyer le test push atelier.');
+    }
+  });
+
+  // Triggered when Google-authenticated staff updates an order/payment via Firestore Client SDK
+  app.post('/api/admin/push/notify-order', async (req, res) => {
+    try {
+      const caller = await resolveServerStaffCaller(req);
+      if (!caller) {
+        res.status(401).json({ error: 'Authentification atelier requise.' });
+        return;
+      }
+      const { orderId, eventType, newStatus, statusLabel, note, correctionMessage, cancellationReason, amount, methodName, receiptNumber, reason } =
+        (req.body || {}) as {
+          orderId?: string;
+          eventType?: 'status_changed' | 'payment_validated' | 'payment_rejected' | 'manual_order';
+          newStatus?: string;
+          statusLabel?: string;
+          note?: string;
+          correctionMessage?: string;
+          cancellationReason?: string;
+          amount?: number;
+          methodName?: string;
+          receiptNumber?: string;
+          reason?: string;
+        };
+      if (!orderId) {
+        res.status(400).json({ error: 'orderId requis.' });
+        return;
+      }
+      const snap = await adminDb.collection('orders').doc(orderId).get();
+      if (!snap.exists) {
+        res.status(404).json({ error: 'Commande introuvable.' });
+        return;
+      }
+      const ord = snap.data() as {
+        orderId: string;
+        orderNumber: string;
+        trackingCode?: string;
+        clientAccountId?: string;
+        receiptNumber?: string;
+      };
+      if (!ord.clientAccountId) {
+        res.json({ ok: true, skipped: true });
+        return;
+      }
+
+      const targetUrl = ord.trackingCode
+        ? `/client/?code=${encodeURIComponent(ord.trackingCode)}`
+        : '/client/';
+
+      if (eventType === 'payment_validated') {
+        const finalReceipt = receiptNumber || ord.receiptNumber;
+        await recordAndDispatchPush({
+          audience: 'client',
+          clientAccountId: ord.clientAccountId,
+          orderId: ord.orderId,
+          orderNumber: ord.orderNumber,
+          trackingCode: ord.trackingCode,
+          title: `Paiement confirmé · ${ord.orderNumber}`,
+          body: `${Number(amount || 0).toLocaleString('fr-FR')} FCFA validés (${methodName || 'Mobile Money'}).${finalReceipt ? ` Reçu ${finalReceipt} disponible.` : ''}`,
+          variant: 'success',
+          url: targetUrl,
+        });
+      } else if (eventType === 'payment_rejected') {
+        await recordAndDispatchPush({
+          audience: 'client',
+          clientAccountId: ord.clientAccountId,
+          orderId: ord.orderId,
+          orderNumber: ord.orderNumber,
+          trackingCode: ord.trackingCode,
+          title: `Justificatif rejeté · ${ord.orderNumber}`,
+          body: `Motif : ${reason || 'Vérifiez votre justificatif de paiement.'}`,
+          variant: 'error',
+          url: targetUrl,
+          requireInteraction: true,
+        });
+      } else if (eventType === 'manual_order') {
+        await recordAndDispatchPush({
+          audience: 'client',
+          clientAccountId: ord.clientAccountId,
+          orderId: ord.orderId,
+          orderNumber: ord.orderNumber,
+          trackingCode: ord.trackingCode,
+          title: `Nouvelle commande · ${ord.orderNumber}`,
+          body: `Votre dossier (${ord.trackingCode || ''}) a été enregistré à l’atelier FBC Print.`,
+          variant: 'info',
+          url: targetUrl,
+        });
+      } else if (newStatus) {
+        const copy = buildClientStatusCopy({
+          orderNumber: ord.orderNumber,
+          newStatus,
+          statusLabel,
+          note,
+          correctionMessage,
+          cancellationReason,
+        });
+        await recordAndDispatchPush({
+          audience: 'client',
+          clientAccountId: ord.clientAccountId,
+          orderId: ord.orderId,
+          orderNumber: ord.orderNumber,
+          trackingCode: ord.trackingCode,
+          title: copy.title,
+          body: copy.body,
+          variant: copy.variant,
+          url: targetUrl,
+          requireInteraction: copy.requireInteraction,
+        });
+      }
+
+      res.json({ ok: true });
+    } catch (err) {
+      handleServerApiError(res, err, 'Impossible d’envoyer la notification client.');
+    }
+  });
+
+  app.get('/api/admin/notifications', async (req, res) => {
+    try {
+      const caller = await resolveServerStaffCaller(req);
+      if (!caller) {
+        res.status(401).json({ error: 'Authentification atelier requise.' });
+        return;
+      }
+      const snap = await adminDb
+        .collection('notifications')
+        .where('audience', '==', 'atelier')
+        .get();
+
+      const notifications = snap.docs
+        .map((d) => serializeFirestoreValue(d.data()) as Record<string, unknown>)
+        .filter((n) => !(caller.actorRole !== 'admin' && n.minRole === 'admin'))
+        .sort((a, b) => Number(b.createdAtMs || 0) - Number(a.createdAtMs || 0))
+        .slice(0, 40);
+
+      const unreadCount = notifications.filter((n) => n.read === false).length;
+      res.json({ notifications, unreadCount });
+    } catch (err) {
+      handleServerApiError(res, err, 'Impossible de charger les notifications atelier.');
+    }
+  });
+
+  app.post('/api/admin/notifications/mark-read', async (req, res) => {
+    try {
+      const caller = await resolveServerStaffCaller(req);
+      if (!caller) {
+        res.status(401).json({ error: 'Authentification atelier requise.' });
+        return;
+      }
+      const { notifId } = (req.body || {}) as { notifId?: string };
+      if (typeof notifId === 'string' && notifId.trim()) {
+        await adminDb
+          .collection('notifications')
+          .doc(notifId.trim())
+          .update({ read: true })
+          .catch(() => {});
+      } else {
+        const snap = await adminDb
+          .collection('notifications')
+          .where('audience', '==', 'atelier')
+          .where('read', '==', false)
+          .get();
+        await Promise.all(
+          snap.docs
+            .filter((d) => {
+              const data = d.data() as { minRole?: string };
+              return !(caller.actorRole !== 'admin' && data.minRole === 'admin');
+            })
+            .map((d) => d.ref.update({ read: true }).catch(() => {}))
+        );
+        const subsSnap = await adminDb
+          .collection('push_subscriptions')
+          .where('audience', '==', 'atelier')
+          .where('staffUid', '==', caller.uid)
+          .get();
+        const nowIso = new Date().toISOString();
+        await Promise.all(
+          subsSnap.docs.map((d) =>
+            d.ref.update({ unreadCount: 0, updatedAt: nowIso }).catch(() => {})
+          )
+        );
+      }
+
+      res.json({ ok: true });
+    } catch (err) {
+      handleServerApiError(res, err, 'Impossible de marquer les alertes atelier comme lues.');
+    }
   });
 
   // Block direct access to internal server-views and legacy admin paths

@@ -411,3 +411,21 @@ export const PAYMENT_STATUS_META: Record<
   paye: { label: 'Payé', bg: 'bg-[#2E9E6B]/15', text: 'text-[#237A52]' },
   rejete: { label: 'Rejeté', bg: 'bg-[#EF233C]/12', text: 'text-[#EF233C]' },
 };
+
+export interface ServerNotificationItem {
+  notifId: string;
+  audience: 'client' | 'atelier';
+  clientAccountId?: string;
+  minRole?: 'operator' | 'admin';
+  orderId?: string;
+  orderNumber?: string;
+  trackingCode?: string;
+  title: string;
+  body: string;
+  variant: 'info' | 'success' | 'warning' | 'error';
+  url?: string;
+  read: boolean;
+  createdAt: string;
+  createdAtMs: number;
+}
+

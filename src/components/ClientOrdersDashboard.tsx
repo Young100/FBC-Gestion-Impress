@@ -30,6 +30,9 @@ import {
 import {
   changeClientPassword,
   logoutClientAccount,
+  sendClientTestPush,
+  subscribeClientWebPush,
+  unsubscribeClientWebPush,
 } from '../lib/clientApi';
 import { formatFcfa } from '../lib/pricing';
 import {
@@ -52,6 +55,7 @@ interface ClientOrdersDashboardProps {
   onStartOrder: () => void;
   onAccountUpdated: (account: ClientAccountPublic) => void;
   onLoggedOut: () => void;
+  onNotificationsChanged?: () => void;
 }
 
 type OrderFilterTab = 'all' | 'active' | 'action' | 'done';
@@ -67,6 +71,7 @@ export const ClientOrdersDashboard: React.FC<ClientOrdersDashboardProps> = ({
   onStartOrder,
   onAccountUpdated,
   onLoggedOut,
+  onNotificationsChanged,
 }) => {
   const { showToast } = useToast();
   const [filterTab, setFilterTab] = useState<OrderFilterTab>('all');
@@ -119,15 +124,23 @@ export const ClientOrdersDashboard: React.FC<ClientOrdersDashboardProps> = ({
       setBrowserNotifEnabledState(next);
       if (next) {
         if (soundEnabled) playNotificationChime('success');
-        void dispatchNativeNotification({
-          title: 'Alertes FBC Print activées',
-          body: 'Vous recevrez un signal sonore et une notification à chaque mise à jour.',
-          tag: 'fbc-client-dashboard-alerts',
-          icon: '/pwa-192x192.png',
-          badge: '/pwa-192x192.png',
-          url: '/client/',
-          swScope: '/client/',
-        });
+        const subscribed = await subscribeClientWebPush();
+        if (subscribed) {
+          await sendClientTestPush().catch(() => {});
+          onNotificationsChanged?.();
+        } else {
+          void dispatchNativeNotification({
+            title: 'Alertes FBC Print activées',
+            body: 'Vous recevrez un signal sonore et une notification à chaque mise à jour.',
+            tag: 'fbc-client-dashboard-alerts',
+            icon: '/pwa-192x192.png',
+            badge: '/pwa-192x192.png',
+            url: '/client/',
+            swScope: '/client/',
+          });
+        }
+      } else {
+        await unsubscribeClientWebPush();
       }
       return;
     }
@@ -136,12 +149,17 @@ export const ClientOrdersDashboard: React.FC<ClientOrdersDashboardProps> = ({
     if (res === 'granted') {
       setBrowserNotifEnabledState(true);
       if (soundEnabled) playNotificationChime('success');
+      const subscribed = await subscribeClientWebPush();
+      if (subscribed) {
+        await sendClientTestPush().catch(() => {});
+        onNotificationsChanged?.();
+      }
       showToast({
         id: 'dash_notif_granted',
         title: 'Alertes sonores et pop-up activées !',
-        message: 'Vous serez notifié en temps réel pour toutes vos commandes.',
+        message: 'Vous serez notifié dans le centre de notifications de votre appareil même hors de l’application.',
         variant: 'success',
-        durationMs: 5000,
+        durationMs: 5500,
       });
     }
   };

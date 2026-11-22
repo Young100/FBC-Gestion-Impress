@@ -2,9 +2,12 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { DEFAULT_PAYMENT_METHODS, DEFAULT_SERVICES, DEFAULT_SETTINGS } from './data/defaults';
 import {
   ClientApiError,
+  fetchClientNotifications,
   fetchClientSession,
   fetchMyOrders,
+  markClientNotificationsRead,
   openOrderByTrackingCode,
+  subscribeClientWebPush,
 } from './lib/clientApi';
 import { subscribePublicCatalog } from './lib/firestoreApi';
 import {
@@ -21,12 +24,14 @@ import {
   isAudioChimeEnabled,
   isBrowserNotifEnabled,
   playNotificationChime,
+  syncAppIconBadge,
 } from './lib/browserNotifications';
 import type {
   ClientAccountPublic,
   Order,
   PaymentMethod,
   PrintService,
+  ServerNotificationItem,
   ShopSettings,
 } from './types/fbc';
 import { ClientAuthPanel } from './components/ClientAuthPanel';
@@ -51,6 +56,8 @@ function AppContent() {
   const [myOrders, setMyOrders] = useState<Order[]>([]);
   const [loadingOrders, setLoadingOrders] = useState(false);
   const [sessionBootstrapped, setSessionBootstrapped] = useState(false);
+  const [clientNotifications, setClientNotifications] = useState<ServerNotificationItem[]>([]);
+  const [unreadNotifCount, setUnreadNotifCount] = useState(0);
 
   const [preselectedServiceId, setPreselectedServiceId] = useState<string | undefined>();
   const [trackedOrder, setTrackedOrder] = useState<Order | null>(null);
@@ -135,16 +142,31 @@ function AppContent() {
     [showToast]
   );
 
+  const loadClientNotifications = useCallback(async () => {
+    try {
+      const res = await fetchClientNotifications();
+      setClientNotifications(res.notifications);
+      setUnreadNotifCount(res.unreadCount);
+      void syncAppIconBadge(res.unreadCount, '/client/');
+    } catch {
+      // Ignore transient notification fetch errors
+    }
+  }, []);
+
   const loadMyOrders = useCallback(
     async (notifyChanges: boolean) => {
       setLoadingOrders(true);
       try {
         const list = await fetchMyOrders();
         syncOrdersAndNotify(list, notifyChanges);
+        await loadClientNotifications();
       } catch (err) {
         if (err instanceof ClientApiError && err.status === 401) {
           setClientAccount(null);
           setMyOrders([]);
+          setClientNotifications([]);
+          setUnreadNotifCount(0);
+          void syncAppIconBadge(0, '/client/');
           setTrackedOrder(null);
           prevOrderSnapshotsRef.current.clear();
         }
@@ -152,7 +174,7 @@ function AppContent() {
         setLoadingOrders(false);
       }
     },
-    [syncOrdersAndNotify]
+    [syncOrdersAndNotify, loadClientNotifications]
   );
 
   // Bootstrap client session + enforce authentication on shared links (?code= / ?track=)
@@ -233,13 +255,34 @@ function AppContent() {
     };
   }, [syncOrdersAndNotify]);
 
-  // Poll authenticated client orders every 8s for live status & payment notifications
+  // Auto-subscribe Web Push and load Notification Center whenever client is logged in
+  useEffect(() => {
+    if (!clientAccount || !sessionBootstrapped) return;
+    void loadClientNotifications();
+    if (
+      getBrowserNotifPermission() === 'granted' &&
+      isBrowserNotifEnabled(CLIENT_PREF_KEY)
+    ) {
+      void subscribeClientWebPush();
+    }
+  }, [clientAccount, sessionBootstrapped, loadClientNotifications]);
+
+  // Poll authenticated client orders + notifications every 8s and refresh on tab foreground
   useEffect(() => {
     if (!clientAccount || !sessionBootstrapped) return;
     const interval = window.setInterval(() => {
       void loadMyOrders(true);
     }, 8000);
-    return () => window.clearInterval(interval);
+    const handleVisibility = () => {
+      if (document.visibilityState === 'visible') {
+        void loadMyOrders(true);
+      }
+    };
+    document.addEventListener('visibilitychange', handleVisibility);
+    return () => {
+      window.clearInterval(interval);
+      document.removeEventListener('visibilitychange', handleVisibility);
+    };
   }, [clientAccount, sessionBootstrapped, loadMyOrders]);
 
   const handleStartOrder = (serviceId?: string) => {
@@ -379,6 +422,9 @@ function AppContent() {
   const handleLoggedOut = () => {
     setClientAccount(null);
     setMyOrders([]);
+    setClientNotifications([]);
+    setUnreadNotifCount(0);
+    void syncAppIconBadge(0, '/client/');
     setTrackedOrder(null);
     setPendingTrackingCode('');
     setTrackingSecurityNotice(null);
@@ -386,11 +432,40 @@ function AppContent() {
     window.history.replaceState({}, '', '/client/');
   };
 
+  const handleOpenNotification = async (notif: ServerNotificationItem) => {
+    if (!notif.read) {
+      setClientNotifications((prev) =>
+        prev.map((n) => (n.notifId === notif.notifId ? { ...n, read: true } : n))
+      );
+      setUnreadNotifCount((c) => {
+        const next = Math.max(0, c - 1);
+        void syncAppIconBadge(next, '/client/');
+        return next;
+      });
+      void markClientNotificationsRead(notif.notifId).catch(() => {});
+    }
+
+    if (notif.trackingCode) {
+      await handleOpenCode(notif.trackingCode);
+    } else {
+      setTrackedOrder(null);
+      setView('orders');
+    }
+  };
+
+  const handleMarkAllNotifsRead = async () => {
+    setClientNotifications((prev) => prev.map((n) => ({ ...n, read: true })));
+    setUnreadNotifCount(0);
+    await markClientNotificationsRead().catch(() => {});
+  };
+
   return (
     <div className="min-h-screen flex flex-col bg-[#EDF2F4] text-black">
       <Header
         currentView={view}
         clientAccount={clientAccount}
+        notifications={clientNotifications}
+        unreadCount={unreadNotifCount}
         onNavigate={(v) => {
           if (v === 'orders' && view !== 'orders') {
             setTrackedOrder(null);
@@ -400,6 +475,8 @@ function AppContent() {
           window.scrollTo({ top: 0, behavior: 'smooth' });
         }}
         onStartOrder={() => handleStartOrder()}
+        onOpenNotification={(n) => void handleOpenNotification(n)}
+        onMarkAllRead={() => void handleMarkAllNotifsRead()}
       />
 
       <OfflineIndicator />
@@ -469,6 +546,7 @@ function AppContent() {
                 window.history.replaceState({}, '', '/client/');
                 window.scrollTo({ top: 0, behavior: 'smooth' });
               }}
+              onNotificationsChanged={() => void loadClientNotifications()}
             />
           ) : (
             <ClientOrdersDashboard
@@ -492,6 +570,7 @@ function AppContent() {
               onStartOrder={() => handleStartOrder()}
               onAccountUpdated={(updatedAcc) => setClientAccount(updatedAcc)}
               onLoggedOut={handleLoggedOut}
+              onNotificationsChanged={() => void loadClientNotifications()}
             />
           )
         )}
